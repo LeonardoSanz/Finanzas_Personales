@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from typing import Optional
+import os
+import io
+import json
+import zipfile
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -257,7 +262,7 @@ def inject_css() -> None:
             font-weight: 700;
         }}
 
-        .workflow-note {
+        .workflow-note {{
             border: 1px solid rgba(0, 209, 255, 0.22);
             background: linear-gradient(90deg, rgba(0, 209, 255, 0.10), rgba(139, 61, 255, 0.08));
             color: var(--muted);
@@ -265,29 +270,29 @@ def inject_css() -> None:
             padding: 12px 16px;
             margin: 2px 0 16px 0;
             font-size: 0.92rem;
-        }
+        }}
 
-        .workflow-note b { color: var(--text); }
+        .workflow-note b {{ color: var(--text); }}
 
-        .mini-card {
+        .mini-card {{
             border: 1px solid rgba(255, 255, 255, 0.08);
             background: rgba(11, 31, 74, 0.62);
             border-radius: 16px;
             padding: 12px 14px;
             min-height: 72px;
-        }
+        }}
 
-        .mini-card b {
+        .mini-card b {{
             color: var(--text);
             display: block;
             font-size: 0.86rem;
             margin-bottom: 5px;
-        }
+        }}
 
-        .mini-card span {
+        .mini-card span {{
             color: var(--muted);
             font-size: 0.90rem;
-        }
+        }}
 
         .input-panel {{
             border: 1px solid rgba(139, 61, 255, 0.26);
@@ -423,6 +428,126 @@ def inject_css() -> None:
 
         hr {{ border-color: rgba(139, 61, 255, 0.20) !important; }}
         .small-muted {{ color: var(--muted); font-size: 0.88rem; }}
+
+        .login-shell {{
+            min-height: 70vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+
+        .login-card {{
+            width: min(620px, 100%);
+            border: 1px solid rgba(183, 140, 255, 0.42);
+            background: linear-gradient(145deg, rgba(11, 31, 74, 0.96), rgba(6, 24, 68, 0.86));
+            border-radius: 30px;
+            padding: 30px 32px;
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.42);
+        }}
+
+        .login-eyebrow {{
+            color: var(--cyan);
+            font-size: 0.78rem;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            font-weight: 900;
+            margin-bottom: 10px;
+        }}
+
+        .login-title {{
+            color: var(--text);
+            font-size: 2.0rem;
+            font-weight: 900;
+            letter-spacing: -0.04em;
+            margin-bottom: 8px;
+        }}
+
+        .login-subtitle {{
+            color: var(--muted);
+            font-size: 0.98rem;
+            line-height: 1.45;
+            margin-bottom: 18px;
+        }}
+
+        .mode-strip {{
+            border: 1px solid rgba(0, 209, 255, 0.18);
+            background: linear-gradient(90deg, rgba(0, 209, 255, 0.09), rgba(139, 61, 255, 0.10));
+            border-radius: 22px;
+            padding: 15px 18px;
+            margin: 2px 0 18px 0;
+            display: flex;
+            gap: 14px;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+        }}
+
+        .mode-strip-title {{
+            color: var(--text);
+            font-weight: 900;
+            font-size: 1.0rem;
+        }}
+
+        .mode-strip-caption {{
+            color: var(--muted);
+            font-size: 0.88rem;
+            margin-top: 2px;
+        }}
+
+        .step-grid {{
+            display: grid;
+            grid-template-columns: repeat(6, minmax(0, 1fr));
+            gap: 10px;
+            margin: 12px 0 18px 0;
+        }}
+
+        .step-card {{
+            border: 1px solid rgba(139, 61, 255, 0.22);
+            background: linear-gradient(145deg, rgba(11, 31, 74, 0.72), rgba(6, 24, 68, 0.54));
+            border-radius: 18px;
+            padding: 13px 13px 12px 13px;
+            min-height: 92px;
+        }}
+
+        .step-card strong {{
+            display: block;
+            color: var(--text);
+            font-size: 0.86rem;
+            margin-bottom: 4px;
+        }}
+
+        .step-card span {{
+            color: var(--muted);
+            font-size: 0.80rem;
+            line-height: 1.25;
+        }}
+
+        .advanced-frame {{
+            border: 1px solid rgba(0, 209, 255, 0.16);
+            background: rgba(2, 8, 31, 0.18);
+            border-radius: 28px;
+            padding: 18px 18px 8px 18px;
+            box-shadow: inset 0 0 0 1px rgba(139, 61, 255, 0.08);
+            margin-bottom: 18px;
+        }}
+
+        .download-card {{
+            border: 1px solid rgba(48, 209, 88, 0.22);
+            background: linear-gradient(145deg, rgba(48, 209, 88, 0.08), rgba(0, 209, 255, 0.06));
+            border-radius: 20px;
+            padding: 15px 16px;
+            margin: 8px 0 16px 0;
+        }}
+
+        .download-card b {{ color: var(--text); }}
+        .download-card span {{ color: var(--muted); font-size: 0.90rem; }}
+
+        @media (max-width: 1100px) {{
+            .step-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+        }}
+        @media (max-width: 650px) {{
+            .step-grid {{ grid-template-columns: 1fr; }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -464,6 +589,58 @@ def survival_tone(pct: float) -> str:
     if pct >= 70:
         return "warn"
     return "bad"
+
+
+# ============================================================
+# Seguridad simple por clave
+# ============================================================
+
+def get_app_password() -> str:
+    """Lee la clave desde Streamlit Secrets o variable de entorno.
+
+    En Streamlit Cloud conviene crear APP_PASSWORD en Secrets.
+    Si no existe, queda una clave default editable en este archivo.
+    """
+    try:
+        secret_value = st.secrets.get("APP_PASSWORD", None)
+    except Exception:
+        secret_value = None
+    env_value = os.environ.get("APP_PASSWORD")
+    return str(secret_value or env_value or "quant2026")
+
+
+def password_gate() -> None:
+    """Bloquea la app hasta ingresar clave."""
+    if st.session_state.get("mc_authenticated", False):
+        return
+
+    st.markdown(
+        """
+        <div class="login-shell">
+            <div class="login-card">
+                <div class="login-eyebrow">Acceso privado</div>
+                <div class="login-title">Simulador patrimonial</div>
+                <div class="login-subtitle">
+                    Ingresa la clave para abrir el panel Monte Carlo.
+                    La app queda protegida antes de mostrar supuestos, resultados o descargas.
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.form("login_form", clear_on_submit=False):
+        password = st.text_input("Clave", type="password", placeholder="Ingresa la clave")
+        submitted_login = st.form_submit_button("Entrar", type="primary")
+
+    if submitted_login:
+        if password == get_app_password():
+            st.session_state["mc_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Clave incorrecta.")
+    st.stop()
 
 
 # ============================================================
@@ -932,6 +1109,114 @@ def make_numeric_csv_table(tabla: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def make_monthly_cashflow_table(result: dict) -> pd.DataFrame:
+    """Calendario mensual exportable en CLP."""
+    inputs = result["inputs"]
+    months = int(inputs["months"])
+    edad_inicial = float(inputs["edad_inicial"])
+    idx = np.arange(months)
+    edad = edad_inicial + idx / 12
+    out = pd.DataFrame(
+        {
+            "mes_simulacion": idx + 1,
+            "edad": np.round(edad, 4),
+            "año_edad": np.floor(edad).astype(int),
+            "ahorro_min_clp": np.round(result.get("saving_min_schedule_mm", np.zeros(months)) * 1_000_000, 0),
+            "ahorro_probable_clp": np.round(result.get("saving_mode_schedule_mm", np.zeros(months)) * 1_000_000, 0),
+            "ahorro_max_clp": np.round(result.get("saving_max_schedule_mm", np.zeros(months)) * 1_000_000, 0),
+            "ahorro_promedio_simulado_clp": np.round(result.get("monthly_savings_mean_mm", np.zeros(months)) * 1_000_000, 0),
+            "retiro_clp": np.round(result.get("withdrawal_schedule_mm", np.zeros(months)) * 1_000_000, 0),
+            "flujo_recurrente_neto_clp": np.round(result.get("recurring_cashflows_mm", np.zeros(months)) * 1_000_000, 0),
+            "flujo_esporadico_clp": np.round(result.get("lump_sums_mm", np.zeros(months)) * 1_000_000, 0),
+            "retorno_mensual_promedio_simulado": result.get("monthly_returns_mean", np.zeros(months)),
+        }
+    )
+    out["flujo_neto_antes_retorno_clp"] = (
+        out["ahorro_promedio_simulado_clp"]
+        + out["flujo_recurrente_neto_clp"]
+        + out["flujo_esporadico_clp"]
+        - out["retiro_clp"]
+    )
+    return out
+
+
+def make_final_distribution_table(result: dict) -> pd.DataFrame:
+    n = len(result["final_wealth_mm"])
+    return pd.DataFrame(
+        {
+            "path_id": np.arange(1, n + 1),
+            "patrimonio_inicio_retiro_clp": np.round(result["wealth_at_retirement_mm"].astype(float) * 1_000_000, 0),
+            "patrimonio_final_clp": np.round(result["final_wealth_mm"].astype(float) * 1_000_000, 0),
+            "edad_agotamiento": result["ruin_age"],
+            "agotado": ~np.isnan(result["ruin_age"]),
+        }
+    )
+
+
+def make_inputs_table(result: dict) -> pd.DataFrame:
+    rows = []
+    for key, value in result.get("inputs", {}).items():
+        if isinstance(value, (list, tuple, dict)):
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        rows.append({"parametro": key, "valor": value})
+    return pd.DataFrame(rows)
+
+
+def make_export_zip(
+    result: dict,
+    tabla: pd.DataFrame,
+    saving_ranges_df: pd.DataFrame | None,
+    recurring_df: pd.DataFrame | None,
+    lump_df: pd.DataFrame | None,
+    afp_info: dict | None,
+    *,
+    include_paths: bool = False,
+) -> bytes:
+    """Crea paquete ZIP con todos los CSV relevantes del escenario."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        def write_csv(name: str, df: pd.DataFrame) -> None:
+            zf.writestr(name, df.to_csv(index=False).encode("utf-8-sig"))
+
+        metadata = pd.DataFrame(
+            [
+                {
+                    "exportado_en": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "edad_inicial": result["inputs"].get("edad_inicial"),
+                    "edad_inicio_retiro": result["inputs"].get("edad_inicio_retiro"),
+                    "edad_final": result["inputs"].get("edad_final"),
+                    "n_paths": result["inputs"].get("n_paths"),
+                    "modelo_retorno": result["inputs"].get("return_model"),
+                }
+            ]
+        )
+        write_csv("00_metadata.csv", metadata)
+        write_csv("01_inputs_modelo.csv", make_inputs_table(result))
+        write_csv("02_resumen_percentiles.csv", result["summary"].copy())
+        write_csv("03_tabla_por_edad.csv", make_numeric_csv_table(tabla))
+        write_csv("04_flujos_mensuales.csv", make_monthly_cashflow_table(result))
+        write_csv("05_distribucion_paths_final.csv", make_final_distribution_table(result))
+
+        if saving_ranges_df is not None:
+            write_csv("06_inputs_tramos_ahorro.csv", saving_ranges_df.copy())
+        if recurring_df is not None:
+            write_csv("07_inputs_flujos_recurrentes.csv", recurring_df.copy())
+        if lump_df is not None:
+            write_csv("08_inputs_flujos_esporadicos.csv", lump_df.copy())
+        if afp_info is not None:
+            write_csv("09_afp_calculada.csv", pd.DataFrame([afp_info]))
+
+        if include_paths:
+            paths_clp = np.round(result["paths_mm"].astype(float) * 1_000_000, 0)
+            edad_inicial = int(result["inputs"].get("edad_inicial", 0))
+            cols = [f"edad_{edad_inicial + i / 12:.2f}" for i in range(paths_clp.shape[1])]
+            paths_df = pd.DataFrame(paths_clp, columns=cols)
+            paths_df.insert(0, "path_id", np.arange(1, paths_clp.shape[0] + 1))
+            write_csv("10_paths_completos_clp.csv", paths_df)
+
+    return buffer.getvalue()
+
+
 # ============================================================
 # App Streamlit
 # ============================================================
@@ -943,6 +1228,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 inject_css()
+password_gate()
 
 st.markdown(
     f"""
@@ -970,10 +1256,22 @@ st.markdown(
 with st.form("formulario_simulacion"):
     st.markdown(
         """
-        <div class="workflow-note">
-            <b>Escenario base guardado para partir:</b> edad 27 → retiro 42 → final 90, capital $35.000.000,
-            retiro $5.000.000 mensual indexado, AFP desde 60 y arriendo desde 52. Ajusta solo lo que quieras probar.
+        <div class="mode-strip">
+            <div>
+                <div class="mode-strip-title">Modo avanzado premium</div>
+                <div class="mode-strip-caption">Configuración por módulos. La idea es partir con tus defaults y tocar solo el bloque que quieras sensibilizar.</div>
+            </div>
+            <div class="quant-pill">Listo para guardar CSV</div>
         </div>
+        <div class="step-grid">
+            <div class="step-card"><strong>1. Base</strong><span>Edad, capital, meta y retiro mensual.</span></div>
+            <div class="step-card"><strong>2. Ahorro</strong><span>Tramos por edad con distribución triangular.</span></div>
+            <div class="step-card"><strong>3. AFP</strong><span>Pensión real estimada e indexada.</span></div>
+            <div class="step-card"><strong>4. Flujos</strong><span>Arriendos, gastos e ingresos mensuales.</span></div>
+            <div class="step-card"><strong>5. Eventos</strong><span>Entradas o salidas de una sola vez.</span></div>
+            <div class="step-card"><strong>6. Mercado</strong><span>Retorno, volatilidad y simulaciones.</span></div>
+        </div>
+        <div class="advanced-frame">
         """,
         unsafe_allow_html=True,
     )
@@ -1224,6 +1522,7 @@ with st.form("formulario_simulacion"):
             mean_is_effective = st.checkbox("Calibrar media truncada", value=True)
         panel_end()
 
+    st.markdown("</div>", unsafe_allow_html=True)
     submitted = st.form_submit_button("Simular escenario", type="primary")
 
 
@@ -1393,6 +1692,7 @@ if submitted:
             st.session_state["mc_lump_df"] = lump_df
             st.session_state["mc_saving_ranges_df"] = saving_ranges_df
             st.session_state["mc_afp_info"] = afp_info
+            st.session_state["mc_export_ready_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     except Exception as exc:
         st.error(f"Error en la simulación: {exc}")
         st.stop()
@@ -1649,24 +1949,82 @@ with tab6:
         summary_display[col.replace("_mm", "_clp")] = summary_display[col].apply(fmt_clp_from_mm)
     st.dataframe(summary_display[["metric", "final_wealth_clp", "wealth_at_retirement_clp", "total_savings_clp"]], width="stretch")
 
-    csv_tabla = make_numeric_csv_table(tabla).to_csv(index=False).encode("utf-8")
-    csv_summary = summary_display.to_csv(index=False).encode("utf-8")
+    st.markdown(
+        """
+        <div class="download-card">
+            <b>Exportar escenario</b><br>
+            <span>Descarga un paquete ZIP con CSVs: inputs, resumen, tabla por edad, flujos mensuales, distribución final y tablas editadas. Puedes incluir paths completos si quieres auditar todo, aunque el archivo será más pesado.</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    c1, c2 = st.columns(2)
+    csv_tabla = make_numeric_csv_table(tabla).to_csv(index=False).encode("utf-8-sig")
+    csv_summary = summary_display.to_csv(index=False).encode("utf-8-sig")
+    csv_flujos = make_monthly_cashflow_table(result).to_csv(index=False).encode("utf-8-sig")
+    csv_dist = make_final_distribution_table(result).to_csv(index=False).encode("utf-8-sig")
+
+    include_paths_export = st.checkbox(
+        "Incluir paths completos en el ZIP",
+        value=False,
+        help="Puede quedar pesado si usas muchas simulaciones. Déjalo apagado para un paquete liviano.",
+    )
+    export_zip = make_export_zip(
+        result,
+        tabla,
+        st.session_state.get("mc_saving_ranges_df"),
+        st.session_state.get("mc_recurring_df"),
+        st.session_state.get("mc_lump_df"),
+        st.session_state.get("mc_afp_info"),
+        include_paths=bool(include_paths_export),
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.download_button(
-            "Descargar tabla por edad CSV",
+            "Descargar ZIP completo",
+            data=export_zip,
+            file_name="escenario_montecarlo_completo.zip",
+            mime="application/zip",
+        )
+    with c2:
+        st.download_button(
+            "Tabla por edad CSV",
             data=csv_tabla,
             file_name="tabla_montecarlo_por_edad_clp.csv",
             mime="text/csv",
         )
-    with c2:
+    with c3:
         st.download_button(
-            "Descargar resumen CSV",
-            data=csv_summary,
-            file_name="resumen_montecarlo_clp.csv",
+            "Flujos mensuales CSV",
+            data=csv_flujos,
+            file_name="flujos_mensuales_clp.csv",
             mime="text/csv",
         )
+    with c4:
+        st.download_button(
+            "Distribución final CSV",
+            data=csv_dist,
+            file_name="distribucion_final_paths_clp.csv",
+            mime="text/csv",
+        )
+
+    with st.expander("Descargas individuales adicionales", expanded=False):
+        c5, c6 = st.columns(2)
+        with c5:
+            st.download_button(
+                "Resumen CSV",
+                data=csv_summary,
+                file_name="resumen_montecarlo_clp.csv",
+                mime="text/csv",
+            )
+        with c6:
+            st.download_button(
+                "Inputs del modelo CSV",
+                data=make_inputs_table(result).to_csv(index=False).encode("utf-8-sig"),
+                file_name="inputs_modelo.csv",
+                mime="text/csv",
+            )
 
 st.divider()
 st.caption(

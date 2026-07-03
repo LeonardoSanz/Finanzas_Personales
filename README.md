@@ -173,3 +173,60 @@ Los flujos esporádicos son eventos únicos. Un ingreso positivo aumenta el patr
   - evento único a los 31 por $40.000.000.
 - Eliminadas las equivalencias visuales bajo cada input monetario para reducir ruido visual.
 - Simplificado el hero superior y agregada una nota compacta del escenario base.
+
+## Seguridad por clave
+
+La app ahora tiene una pantalla de acceso antes de mostrar inputs o resultados.
+
+Orden de lectura de la clave:
+
+1. `APP_PASSWORD` en Streamlit Secrets.
+2. Variable de entorno `APP_PASSWORD`.
+3. Fallback local: `quant2026`.
+
+Para Streamlit Cloud, agrega en **App settings → Secrets**:
+
+```toml
+APP_PASSWORD = "tu_clave_segura"
+```
+
+Recomendación: usar Secrets y cambiar la clave fallback si el repositorio queda público.
+
+## Exportación CSV
+
+En el tab **Tablas** se agregó una sección de exportación:
+
+- ZIP completo con CSVs del escenario.
+- Tabla por edad CSV.
+- Flujos mensuales CSV.
+- Distribución final por path CSV.
+- Resumen CSV.
+- Inputs del modelo CSV.
+
+El ZIP incluye:
+
+- metadata,
+- inputs del modelo,
+- resumen de percentiles,
+- tabla por edad,
+- calendario mensual de flujos,
+- distribución final por path,
+- tramos de ahorro cargados,
+- flujos recurrentes cargados,
+- flujos esporádicos cargados,
+- cálculo AFP.
+
+Existe una opción para incluir los paths completos en CLP. Puede generar un archivo pesado si se usan muchas simulaciones.
+
+## Modo avanzado premium
+
+Se agregó una capa visual superior con flujo de trabajo por módulos:
+
+1. Base.
+2. Ahorro.
+3. AFP.
+4. Flujos.
+5. Eventos.
+6. Mercado.
+
+La app sigue siendo avanzada, pero queda más vendible visualmente y menos saturada al ingresar parámetros.
