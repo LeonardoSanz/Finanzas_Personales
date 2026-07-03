@@ -230,3 +230,32 @@ Se agregó una capa visual superior con flujo de trabajo por módulos:
 6. Mercado.
 
 La app sigue siendo avanzada, pero queda más vendible visualmente y menos saturada al ingresar parámetros.
+
+## Diagnóstico FIRE / Coast FIRE
+
+Se agregó un nuevo tab **FIRE / Coast FIRE** con un cálculo aparte basado en los mismos supuestos del escenario simulado.
+
+El usuario define una probabilidad mínima de éxito, por defecto `90%`, y la app prueba edades candidatas desde la edad inicial hasta la edad de retiro objetivo.
+
+### FIRE anticipado
+
+Pregunta:
+
+> ¿Cuál es la edad más temprana desde la cual podría empezar a retirar el monto mensual deseado y mantener alta probabilidad de no agotar patrimonio hasta los 90?
+
+La métrica principal es `prob_no_agotar_pct`.
+
+### Coast FIRE
+
+Pregunta:
+
+> ¿Desde qué edad podría dejar de aportar capital nuevo y, aun así, jubilarme en la edad objetivo con buena probabilidad de éxito?
+
+Se muestran dos lecturas:
+
+- **Coast FIRE robusto:** primera edad donde se puede dejar de ahorrar y mantener probabilidad de no agotarse hasta los 90 mayor o igual al umbral.
+- **Coast a la meta:** primera edad donde se puede dejar de ahorrar y llegar a la meta patrimonial en la edad objetivo con probabilidad mayor o igual al umbral.
+
+El diagnóstico usa una cantidad menor de simulaciones que el escenario principal para no volver lenta la app. Por defecto usa hasta `8.000` simulaciones, editable en el tab.
+
+El resultado puede descargarse como CSV individual y también queda incluido dentro del ZIP completo si ya fue calculado.
