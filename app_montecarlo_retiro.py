@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -11,22 +15,316 @@ from montecarlo_engine import (
 
 
 # ============================================================
+# Identidad visual / estilo dashboard
+# ============================================================
+
+COLOR_BG = "#041F5F"
+COLOR_BG_2 = "#061844"
+COLOR_CARD = "#0B1F4A"
+COLOR_CARD_2 = "#102B66"
+COLOR_PRIMARY = "#8B3DFF"
+COLOR_PRIMARY_2 = "#B78CFF"
+COLOR_CYAN = "#00D1FF"
+COLOR_TEXT = "#F5F7FA"
+COLOR_MUTED = "#B8C4D8"
+COLOR_GOOD = "#30D158"
+COLOR_WARN = "#FFD166"
+COLOR_BAD = "#FF5C7A"
+
+PLOTLY_TEMPLATE = "plotly_dark"
+PERCENTILE_COLORS = {
+    "p95": "#6EE7FF",
+    "p75": "#36A3FF",
+    "p50 / mediana": "#B78CFF",
+    "p25": "#8B3DFF",
+    "p5": "#FF5C7A",
+    "media": "#FFFFFF",
+}
+
+
+def inject_css() -> None:
+    st.markdown(
+        f"""
+        <style>
+        :root {{
+            --bg: {COLOR_BG};
+            --bg2: {COLOR_BG_2};
+            --card: {COLOR_CARD};
+            --card2: {COLOR_CARD_2};
+            --primary: {COLOR_PRIMARY};
+            --primary2: {COLOR_PRIMARY_2};
+            --cyan: {COLOR_CYAN};
+            --text: {COLOR_TEXT};
+            --muted: {COLOR_MUTED};
+            --good: {COLOR_GOOD};
+            --warn: {COLOR_WARN};
+            --bad: {COLOR_BAD};
+        }}
+
+        .stApp {{
+            background:
+                radial-gradient(circle at top left, rgba(139, 61, 255, 0.22), transparent 32%),
+                radial-gradient(circle at top right, rgba(0, 209, 255, 0.14), transparent 30%),
+                linear-gradient(135deg, var(--bg) 0%, #031135 50%, #02081F 100%);
+            color: var(--text);
+        }}
+
+        section[data-testid="stSidebar"] {{
+            background: linear-gradient(180deg, rgba(11, 31, 74, 0.98) 0%, rgba(4, 31, 95, 0.96) 100%);
+            border-right: 1px solid rgba(139, 61, 255, 0.30);
+        }}
+
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] p {{
+            color: var(--text) !important;
+        }}
+
+        .main .block-container {{
+            padding-top: 1.35rem;
+            padding-bottom: 2.0rem;
+            max-width: 1500px;
+        }}
+
+        .quant-hero {{
+            border: 1px solid rgba(139, 61, 255, 0.35);
+            background: linear-gradient(135deg, rgba(11, 31, 74, 0.88), rgba(16, 43, 102, 0.72));
+            border-radius: 24px;
+            padding: 24px 28px;
+            box-shadow: 0 18px 52px rgba(0, 0, 0, 0.30);
+            margin-bottom: 18px;
+        }}
+
+        .quant-title {{
+            font-size: 2.05rem;
+            line-height: 1.08;
+            font-weight: 800;
+            letter-spacing: -0.035em;
+            color: var(--text);
+            margin-bottom: 8px;
+        }}
+
+        .quant-subtitle {{
+            color: var(--muted);
+            font-size: 1.02rem;
+            max-width: 1050px;
+            margin-bottom: 0px;
+        }}
+
+        .quant-pill-row {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 9px;
+            margin-top: 16px;
+        }}
+
+        .quant-pill {{
+            border: 1px solid rgba(0, 209, 255, 0.28);
+            background: rgba(0, 209, 255, 0.08);
+            color: var(--text);
+            border-radius: 999px;
+            padding: 6px 11px;
+            font-size: 0.82rem;
+            font-weight: 650;
+        }}
+
+        .metric-card {{
+            min-height: 128px;
+            border: 1px solid rgba(139, 61, 255, 0.26);
+            background: linear-gradient(145deg, rgba(11, 31, 74, 0.94), rgba(6, 24, 68, 0.92));
+            border-radius: 20px;
+            padding: 18px 18px 15px 18px;
+            box-shadow: 0 16px 35px rgba(0, 0, 0, 0.24);
+            position: relative;
+            overflow: hidden;
+        }}
+
+        .metric-card::before {{
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(90deg, rgba(139, 61, 255, 0.22), transparent 38%);
+            pointer-events: none;
+        }}
+
+        .metric-label {{
+            position: relative;
+            z-index: 1;
+            color: var(--muted);
+            font-size: 0.79rem;
+            text-transform: uppercase;
+            letter-spacing: 0.075em;
+            font-weight: 750;
+            margin-bottom: 8px;
+        }}
+
+        .metric-value {{
+            position: relative;
+            z-index: 1;
+            color: var(--text);
+            font-size: 1.70rem;
+            line-height: 1.10;
+            font-weight: 850;
+            letter-spacing: -0.025em;
+        }}
+
+        .metric-note {{
+            position: relative;
+            z-index: 1;
+            color: var(--muted);
+            font-size: 0.80rem;
+            margin-top: 8px;
+        }}
+
+        .metric-good .metric-value {{ color: var(--good); }}
+        .metric-warn .metric-value {{ color: var(--warn); }}
+        .metric-bad .metric-value {{ color: var(--bad); }}
+        .metric-primary .metric-value {{ color: var(--primary2); }}
+        .metric-cyan .metric-value {{ color: var(--cyan); }}
+
+        .section-card {{
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(11, 31, 74, 0.60);
+            border-radius: 18px;
+            padding: 16px 18px;
+            margin: 8px 0 18px 0;
+        }}
+
+        div[data-testid="stAlert"] {{
+            border-radius: 16px;
+            border: 1px solid rgba(139, 61, 255, 0.25);
+            background: rgba(11, 31, 74, 0.85);
+        }}
+
+        .stButton > button {{
+            width: 100%;
+            border-radius: 14px;
+            border: 1px solid rgba(183, 140, 255, 0.65);
+            background: linear-gradient(90deg, var(--primary), #5F7CFF);
+            color: white;
+            font-weight: 800;
+            box-shadow: 0 12px 28px rgba(139, 61, 255, 0.28);
+        }}
+
+        .stButton > button:hover {{
+            border-color: var(--cyan);
+            filter: brightness(1.08);
+        }}
+
+        div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] {{
+            border-radius: 16px;
+            overflow: hidden;
+            border: 1px solid rgba(139, 61, 255, 0.18);
+        }}
+
+        div[data-baseweb="tab-list"] {{
+            gap: 8px;
+        }}
+
+        button[data-baseweb="tab"] {{
+            background: rgba(11, 31, 74, 0.70);
+            border-radius: 999px;
+            padding-left: 14px;
+            padding-right: 14px;
+            border: 1px solid rgba(139, 61, 255, 0.18);
+        }}
+
+        button[data-baseweb="tab"][aria-selected="true"] {{
+            background: rgba(139, 61, 255, 0.28);
+            border: 1px solid rgba(183, 140, 255, 0.55);
+        }}
+
+        hr {{
+            border-color: rgba(139, 61, 255, 0.20) !important;
+        }}
+
+        .small-muted {{
+            color: var(--muted);
+            font-size: 0.88rem;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def apply_plot_theme(fig: go.Figure) -> go.Figure:
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(4, 31, 95, 0.24)",
+        font={"color": COLOR_TEXT, "family": "Inter, Segoe UI, Arial"},
+        title={"font": {"size": 20, "color": COLOR_TEXT}},
+        legend={
+            "bgcolor": "rgba(11, 31, 74, 0.35)",
+            "bordercolor": "rgba(139, 61, 255, 0.25)",
+            "borderwidth": 1,
+        },
+        margin={"l": 50, "r": 28, "t": 62, "b": 48},
+    )
+    fig.update_xaxes(gridcolor="rgba(184, 196, 216, 0.12)", zerolinecolor="rgba(184, 196, 216, 0.18)")
+    fig.update_yaxes(gridcolor="rgba(184, 196, 216, 0.12)", zerolinecolor="rgba(184, 196, 216, 0.18)")
+    return fig
+
+
+def metric_card(label: str, value: str, note: str = "", tone: str = "primary") -> None:
+    safe_note = f'<div class="metric-note">{note}</div>' if note else ""
+    st.markdown(
+        f"""
+        <div class="metric-card metric-{tone}">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
+            {safe_note}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def fmt_mm(x: float, decimals: int = 0) -> str:
+    if np.isnan(x):
+        return "N/A"
+    return f"{x:,.{decimals}f} MM"
+
+
+def fmt_pct(x: float, decimals: int = 1) -> str:
+    if np.isnan(x):
+        return "N/A"
+    return f"{x:,.{decimals}f}%"
+
+
+# ============================================================
 # Gráficos
 # ============================================================
+
 
 def plot_percentile_fan(tabla: pd.DataFrame, edad_inicio_retiro: int, target_mm: Optional[float]) -> go.Figure:
     fig = go.Figure()
 
-    fig.add_trace(go.Scatter(x=tabla["edad"], y=tabla["p95_mm"], name="p95", mode="lines"))
-    fig.add_trace(go.Scatter(x=tabla["edad"], y=tabla["p75_mm"], name="p75", mode="lines"))
-    fig.add_trace(go.Scatter(x=tabla["edad"], y=tabla["p50_mediana_mm"], name="p50 / mediana", mode="lines"))
-    fig.add_trace(go.Scatter(x=tabla["edad"], y=tabla["p25_mm"], name="p25", mode="lines"))
-    fig.add_trace(go.Scatter(x=tabla["edad"], y=tabla["p5_mm"], name="p5", mode="lines"))
-    fig.add_trace(go.Scatter(x=tabla["edad"], y=tabla["media_mm"], name="media", mode="lines"))
+    for col, name in [
+        ("p95_mm", "p95"),
+        ("p75_mm", "p75"),
+        ("p50_mediana_mm", "p50 / mediana"),
+        ("p25_mm", "p25"),
+        ("p5_mm", "p5"),
+        ("media_mm", "media"),
+    ]:
+        fig.add_trace(
+            go.Scatter(
+                x=tabla["edad"],
+                y=tabla[col],
+                name=name,
+                mode="lines",
+                line={"width": 3 if name in {"p50 / mediana", "media"} else 2, "color": PERCENTILE_COLORS[name]},
+            )
+        )
 
     fig.add_vline(
         x=edad_inicio_retiro,
         line_dash="dash",
+        line_color=COLOR_CYAN,
         annotation_text="inicio retiro",
         annotation_position="top left",
     )
@@ -35,6 +333,7 @@ def plot_percentile_fan(tabla: pd.DataFrame, edad_inicio_retiro: int, target_mm:
         fig.add_hline(
             y=target_mm,
             line_dash="dot",
+            line_color=COLOR_WARN,
             annotation_text=f"objetivo {target_mm:,.0f} MM",
             annotation_position="top left",
         )
@@ -46,7 +345,7 @@ def plot_percentile_fan(tabla: pd.DataFrame, edad_inicio_retiro: int, target_mm:
         hovermode="x unified",
         legend_title="Serie",
     )
-    return fig
+    return apply_plot_theme(fig)
 
 
 def plot_sample_paths(result: dict, n_sample: int = 300) -> go.Figure:
@@ -70,15 +369,27 @@ def plot_sample_paths(result: dict, n_sample: int = 300) -> go.Figure:
                 x=x,
                 y=row,
                 mode="lines",
-                line={"width": 0.8},
-                opacity=0.18,
+                line={"width": 0.75, "color": COLOR_PRIMARY_2},
+                opacity=0.16,
                 showlegend=False,
+                hoverinfo="skip",
             )
         )
 
-    fig.add_vline(x=edad_inicio_retiro, line_dash="dash", annotation_text="inicio retiro")
+    median_path = np.percentile(paths, 50, axis=0)
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=median_path,
+            mode="lines",
+            name="mediana",
+            line={"width": 3.2, "color": COLOR_CYAN},
+        )
+    )
+
+    fig.add_vline(x=edad_inicio_retiro, line_dash="dash", line_color=COLOR_CYAN, annotation_text="inicio retiro")
     if target_mm is not None:
-        fig.add_hline(y=target_mm, line_dash="dot", annotation_text=f"objetivo {target_mm:,.0f} MM")
+        fig.add_hline(y=target_mm, line_dash="dot", line_color=COLOR_WARN, annotation_text=f"objetivo {target_mm:,.0f} MM")
 
     fig.update_layout(
         title=f"Paths Monte Carlo simulados ({n_sample:,} paths mostrados)",
@@ -86,7 +397,7 @@ def plot_sample_paths(result: dict, n_sample: int = 300) -> go.Figure:
         yaxis_title="Patrimonio (MM CLP)",
         hovermode="x unified",
     )
-    return fig
+    return apply_plot_theme(fig)
 
 
 def plot_final_distribution(result: dict) -> go.Figure:
@@ -97,9 +408,11 @@ def plot_final_distribution(result: dict) -> go.Figure:
         nbins=80,
         labels={"x": "Patrimonio final (MM CLP)", "y": "Frecuencia"},
         title=f"Distribución del patrimonio final a los {edad_final} años",
+        color_discrete_sequence=[COLOR_PRIMARY],
     )
+    fig.update_traces(marker_line_width=0.3, marker_line_color="rgba(255,255,255,0.20)")
     fig.update_layout(showlegend=False)
-    return fig
+    return apply_plot_theme(fig)
 
 
 def plot_ruin_distribution(result: dict) -> go.Figure:
@@ -108,15 +421,18 @@ def plot_ruin_distribution(result: dict) -> go.Figure:
     if len(data) == 0:
         fig = go.Figure()
         fig.update_layout(title="No hubo agotamiento de patrimonio en las simulaciones")
-        return fig
+        return apply_plot_theme(fig)
+
     fig = px.histogram(
         x=data,
         nbins=40,
         labels={"x": "Edad de agotamiento", "y": "Frecuencia"},
         title="Distribución de edad de agotamiento del patrimonio",
+        color_discrete_sequence=[COLOR_BAD],
     )
+    fig.update_traces(marker_line_width=0.3, marker_line_color="rgba(255,255,255,0.20)")
     fig.update_layout(showlegend=False)
-    return fig
+    return apply_plot_theme(fig)
 
 
 # ============================================================
@@ -125,11 +441,30 @@ def plot_ruin_distribution(result: dict) -> go.Figure:
 
 st.set_page_config(
     page_title="Monte Carlo Retiro Fijo",
+    page_icon="📈",
     layout="wide",
 )
+inject_css()
 
-st.title("Monte Carlo patrimonial: acumulación + retiro fijo")
-st.caption("Unidad de trabajo: MM CLP. Ejemplo: 3.0 equivale a $3.000.000.")
+st.markdown(
+    """
+    <div class="quant-hero">
+        <div class="quant-title">Monte Carlo patrimonial: acumulación + retiro fijo</div>
+        <div class="quant-subtitle">
+            Simulador en MM CLP para probar desde qué edad dejas de ahorrar, cuánto retiras fijo al mes
+            y si el patrimonio sigue creciendo, se estabiliza o comienza a caer.
+        </div>
+        <div class="quant-pill-row">
+            <div class="quant-pill">MM CLP</div>
+            <div class="quant-pill">Acumulación</div>
+            <div class="quant-pill">Retiro fijo mensual</div>
+            <div class="quant-pill">Riesgo de agotamiento</div>
+            <div class="quant-pill">Percentiles Monte Carlo</div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
     st.header("Supuestos principales")
@@ -188,8 +523,15 @@ with st.sidebar:
     seed = st.number_input("Seed", min_value=0, max_value=999_999, value=123, step=1)
     floor_zero = st.checkbox("Patrimonio no puede quedar negativo", value=True)
 
-st.subheader("Aportes extraordinarios")
-st.write("Opcional. Usa mes de simulación 1 para el primer mes. Deja monto 0 si no aplica.")
+st.markdown(
+    """
+    <div class="section-card">
+        <b>Aportes extraordinarios</b><br>
+        <span class="small-muted">Opcional. Usa mes de simulación 1 para el primer mes. Deja monto 0 si no aplica.</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 default_lump_df = pd.DataFrame(
     {
@@ -270,19 +612,45 @@ prob_target_final = result["prob_reach_target_final"] * 100
 prob_grow = result["prob_final_above_retirement_wealth"] * 100
 median_ruin_age = result["median_ruin_age"]
 
-st.subheader("Resumen del escenario")
+def survival_tone(pct: float) -> str:
+    if pct >= 90:
+        return "good"
+    if pct >= 70:
+        return "warn"
+    return "bad"
+
+st.markdown("### Resumen del escenario")
 
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("P50 al inicio del retiro", f"{ret_p50:,.0f} MM")
-k2.metric("P50 final", f"{final_p50:,.0f} MM")
-k3.metric("Prob. no agotarse", f"{prob_no_ruin:,.1f}%")
-k4.metric("Prob. final > inicio retiro", f"{prob_grow:,.1f}%" if not np.isnan(prob_grow) else "N/A")
+with k1:
+    metric_card("P50 inicio retiro", fmt_mm(ret_p50), "Patrimonio mediano al cortar el ahorro", "primary")
+with k2:
+    metric_card("P50 final", fmt_mm(final_p50), f"Edad final: {int(edad_final)} años", "cyan")
+with k3:
+    metric_card("Prob. no agotarse", fmt_pct(prob_no_ruin), "Paths que nunca llegan a cero", survival_tone(prob_no_ruin))
+with k4:
+    metric_card(
+        "Final > inicio retiro",
+        fmt_pct(prob_grow),
+        "Evalúa si el capital crece pese al retiro",
+        survival_tone(prob_grow) if not np.isnan(prob_grow) else "primary",
+    )
 
+st.write("")
 k5, k6, k7, k8 = st.columns(4)
-k5.metric("Prob. objetivo al retiro", f"{prob_target_ret:,.1f}%")
-k6.metric("Prob. objetivo al final", f"{prob_target_final:,.1f}%")
-k7.metric("Retiro total pedido", f"{result['total_withdrawal_requested_mm']:,.0f} MM")
-k8.metric("Edad mediana agotamiento", "No se agota" if np.isnan(median_ruin_age) else f"{median_ruin_age:,.1f}")
+with k5:
+    metric_card("Objetivo al retiro", fmt_pct(prob_target_ret), f"Target: {float(target_mm):,.0f} MM", "primary")
+with k6:
+    metric_card("Objetivo al final", fmt_pct(prob_target_final), "Probabilidad de cerrar sobre target", "cyan")
+with k7:
+    metric_card("Retiro total pedido", fmt_mm(result["total_withdrawal_requested_mm"]), "Suma nominal del calendario de retiros", "primary")
+with k8:
+    metric_card(
+        "Edad mediana agotamiento",
+        "No se agota" if np.isnan(median_ruin_age) else f"{median_ruin_age:,.1f}",
+        "Solo considera paths que llegan a cero",
+        "good" if np.isnan(median_ruin_age) else "bad",
+    )
 
 st.caption(
     f"Media efectiva anual simulada: {result['inputs']['effective_truncated_mean_annualized'] * 100:,.2f}%. "
