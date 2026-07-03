@@ -140,3 +140,16 @@ Esto es una herramienta de simulación y no una recomendación financiera.
 - Corregido error `KeyError: monto_inicio_nominal_mm` asociado a resultados/caché de flujos recurrentes.
 - Eliminadas las vistas duplicadas con separadores bajo los editores de ahorro, flujos recurrentes y flujos esporádicos.
 - Eliminadas las tablas auxiliares bajo el gráfico de flujos para dejar la pantalla más limpia. El detalle sigue disponible en el tab **Tablas** y en las descargas CSV.
+
+## Mejora - distribución por edad
+
+El tab de distribución ya no queda fijo solo a los 90 años. Ahora permite elegir la edad que se quiere revisar y muestra P5, P50 y P95 para esa edad específica. Esto sirve para comparar momentos clave como inicio de retiro, jubilación AFP, etapa con hijos o edad final.
+
+## Lectura de flujos esporádicos
+
+Los flujos esporádicos son eventos únicos. Un ingreso positivo aumenta el patrimonio en ese mes; un egreso negativo reduce el patrimonio en ese mes. Después, el patrimonio resultante sigue rentando según el modelo de retorno elegido. Los flujos recurrentes indexados, como AFP o arriendos, sí crecen mes a mes con inflación.
+
+## Actualización anti-crash
+
+- Corregido `Edad inicio retiro`: cuando la edad inicial sube sobre 40, el valor por defecto ahora se ajusta automáticamente a la edad inicial. Antes podía quedar `value=40` con `min_value>40`, lo que hacía caer Streamlit al cambiar parámetros.
+- Se agregó un clamp extra al selector de distribución por edad para evitar índices fuera de rango si se cambia el horizonte/edad y queda estado anterior en sesión.

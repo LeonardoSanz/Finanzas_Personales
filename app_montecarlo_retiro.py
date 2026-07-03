@@ -757,16 +757,28 @@ def plot_sample_paths(result: dict, n_sample: int = 300) -> go.Figure:
     return apply_plot_theme(fig)
 
 
-def plot_final_distribution(result: dict) -> go.Figure:
-    final_wealth_clp = result["final_wealth_mm"] * 1_000_000
-    edad_final = result["inputs"]["edad_final"]
-    p5, p50, p95 = np.percentile(final_wealth_clp, [5, 50, 95])
+def plot_distribution_at_age(result: dict, selected_age: int | float | None = None) -> go.Figure:
+    """Histograma del patrimonio simulado para la edad elegida."""
+    inputs = result["inputs"]
+    edad_inicial = int(inputs["edad_inicial"])
+    edad_final = int(inputs["edad_final"])
+    months = int(inputs["months"])
+
+    if selected_age is None:
+        selected_age = edad_final
+    selected_age = float(min(max(float(selected_age), float(edad_inicial)), float(edad_final)))
+    month_idx = int(round((selected_age - edad_inicial) * 12))
+    month_idx = min(max(month_idx, 0), months)
+    selected_age_exact = edad_inicial + month_idx / 12
+
+    wealth_clp = result["paths_mm"][:, month_idx].astype(float) * 1_000_000
+    p5, p50, p95 = np.percentile(wealth_clp, [5, 50, 95])
 
     fig = px.histogram(
-        x=final_wealth_clp,
+        x=wealth_clp,
         nbins=80,
-        labels={"x": "Patrimonio final (CLP)", "y": "Frecuencia"},
-        title=f"Distribución del patrimonio final a los {edad_final} años",
+        labels={"x": "Patrimonio (CLP)", "y": "Frecuencia"},
+        title=f"Distribución del patrimonio a los {selected_age_exact:,.0f} años",
         color_discrete_sequence=[COLOR_PRIMARY],
     )
     fig.update_traces(marker_line_width=0.3, marker_line_color="rgba(255,255,255,0.20)")
@@ -794,8 +806,30 @@ def plot_final_distribution(result: dict) -> go.Figure:
             bordercolor="rgba(255,255,255,0.18)",
             borderwidth=1,
         )
-    fig.update_layout(margin={"l": 72, "r": 36, "t": 100, "b": 54})
+
+    # Indicador de edad revisada y percentiles principales, para que el gráfico sea autoexplicativo.
+    fig.add_annotation(
+        xref="paper",
+        yref="paper",
+        x=0,
+        y=1.16,
+        showarrow=False,
+        align="left",
+        text=(
+            f"Edad revisada: <b>{selected_age_exact:,.0f}</b> · "
+            f"P5: <b>{fmt_clp(p5)}</b> · "
+            f"P50: <b>{fmt_clp(p50)}</b> · "
+            f"P95: <b>{fmt_clp(p95)}</b>"
+        ),
+        font={"size": 13, "color": COLOR_MUTED},
+    )
+    fig.update_layout(margin={"l": 72, "r": 36, "t": 122, "b": 54})
     return apply_plot_theme(fig, y_currency=False, x_currency=True)
+
+
+# Alias para compatibilidad interna si alguna parte antigua lo llama.
+def plot_final_distribution(result: dict) -> go.Figure:
+    return plot_distribution_at_age(result, result["inputs"]["edad_final"])
 
 
 def plot_ruin_distribution(result: dict) -> go.Figure:
@@ -912,11 +946,12 @@ with st.form("formulario_simulacion"):
         edad_final = EDAD_FINAL_FIJA
         st.number_input("Edad final", min_value=EDAD_FINAL_FIJA, max_value=EDAD_FINAL_FIJA, value=EDAD_FINAL_FIJA, step=1, disabled=True)
     with c3:
+        default_edad_inicio_retiro = min(max(40, int(edad_inicial)), EDAD_FINAL_FIJA)
         edad_inicio_retiro = st.number_input(
             "Edad inicio retiro",
             min_value=int(edad_inicial),
             max_value=EDAD_FINAL_FIJA,
-            value=min(40, EDAD_FINAL_FIJA),
+            value=default_edad_inicio_retiro,
             step=1,
             help="Desde esta edad el ahorro mensual se vuelve cero y comienza el retiro fijo mensual.",
         )
@@ -1486,6 +1521,10 @@ with tab1:
     st.plotly_chart(plot_percentile_fan(tabla, int(result["inputs"]["edad_inicio_retiro"]), float(target_clp)), width="stretch")
 
 with tab2:
+    st.info(
+        "Lectura: los flujos esporádicos positivos aumentan el patrimonio una sola vez; los negativos lo reducen una sola vez. "
+        "Después de ese mes, el patrimonio resultante sigue rentando con el modelo de retorno. Los flujos recurrentes indexados, como arriendos o AFP, sí crecen mes a mes con inflación."
+    )
     st.plotly_chart(plot_cashflow_schedule(result), width="stretch")
     if result.get("afp_info", {}).get("enabled"):
         afp = result["afp_info"]
@@ -1507,7 +1546,28 @@ with tab3:
     st.plotly_chart(plot_sample_paths(result, n_sample=n_sample), width="stretch")
 
 with tab4:
-    st.plotly_chart(plot_final_distribution(result), width="stretch")
+    dist_c1, dist_c2 = st.columns([1, 3])
+    with dist_c1:
+        edad_distribucion = st.slider(
+            "Edad a revisar",
+            min_value=int(result["inputs"]["edad_inicial"]),
+            max_value=int(result["inputs"]["edad_final"]),
+            value=int(result["inputs"]["edad_final"]),
+            step=1,
+            help="Permite ver la distribución del patrimonio en cualquier edad del horizonte, no solo a los 90.",
+        )
+        month_idx_dist = int(round((edad_distribucion - int(result["inputs"]["edad_inicial"])) * 12))
+        month_idx_dist = min(max(month_idx_dist, 0), result["paths_mm"].shape[1] - 1)
+        wealth_dist = result["paths_mm"][:, month_idx_dist].astype(float) * 1_000_000
+        quick_text = (
+            f'<div class="definition-card"><b>Lectura rápida</b><br>'
+            f'<span>P5: {fmt_clp(np.percentile(wealth_dist, 5))}<br>'
+            f'P50: {fmt_clp(np.percentile(wealth_dist, 50))}<br>'
+            f'P95: {fmt_clp(np.percentile(wealth_dist, 95))}</span></div>'
+        )
+        st.markdown(quick_text, unsafe_allow_html=True)
+    with dist_c2:
+        st.plotly_chart(plot_distribution_at_age(result, edad_distribucion), width="stretch")
 
 with tab5:
     st.plotly_chart(plot_ruin_distribution(result), width="stretch")
