@@ -1010,22 +1010,9 @@ with st.form("formulario_simulacion"):
         },
         key="saving_ranges_editor",
     )
-    saving_preview = saving_ranges_df.copy()
-    if not saving_preview.empty:
-        saving_preview["min_num"] = saving_preview["ahorro_min_clp"].apply(parse_clp_value)
-        saving_preview["prob_num"] = saving_preview["ahorro_probable_clp"].apply(parse_clp_value)
-        saving_preview["max_num"] = saving_preview["ahorro_max_clp"].apply(parse_clp_value)
-        saving_preview = saving_preview[(saving_preview["min_num"] != 0) | (saving_preview["prob_num"] != 0) | (saving_preview["max_num"] != 0)].copy()
-        if not saving_preview.empty:
-            saving_preview["min_formato"] = saving_preview["min_num"].apply(fmt_clp)
-            saving_preview["probable_formato"] = saving_preview["prob_num"].apply(fmt_clp)
-            saving_preview["max_formato"] = saving_preview["max_num"].apply(fmt_clp)
-            st.caption("Vista con separadores. Los tramos que pasen la edad de retiro se cortan automáticamente al iniciar retiro.")
-            st.dataframe(
-                saving_preview[["descripcion", "edad_inicio", "edad_fin", "min_formato", "probable_formato", "max_formato"]],
-                width="stretch",
-                hide_index=True,
-            )
+    # Se eliminó la vista duplicada con separadores bajo el editor.
+    # El editor acepta montos escritos como 1.000.000, $1.000.000 o 1 MM,
+    # y el parsing se mantiene en la preparación de inputs antes de simular.
     panel_end()
 
     panel_start(
@@ -1092,19 +1079,7 @@ with st.form("formulario_simulacion"):
         },
         key="recurring_editor",
     )
-    rec_preview = recurring_df.copy()
-    if not rec_preview.empty:
-        rec_preview["monto_mensual_clp_num"] = rec_preview["monto_mensual_clp"].apply(parse_clp_value)
-        rec_preview = rec_preview[rec_preview["monto_mensual_clp_num"] != 0].copy()
-        if not rec_preview.empty:
-            rec_preview["monto_mensual_formato"] = rec_preview["monto_mensual_clp_num"].apply(fmt_clp)
-            rec_preview["equivalente_mm"] = rec_preview["monto_mensual_clp_num"].apply(fmt_mm_from_clp)
-            st.caption("Vista con separadores")
-            st.dataframe(
-                rec_preview[["descripcion", "tipo", "edad_inicio", "edad_fin", "monto_mensual_formato", "equivalente_mm", "indexar_inflacion"]],
-                width="stretch",
-                hide_index=True,
-            )
+    # Se eliminó la vista duplicada con separadores bajo el editor.
     panel_end()
 
     panel_start("5. Flujos esporádicos", "Plata que entra o sale una sola vez: bono, venta de activo, pie de propiedad, gasto grande, herencia, prepago, etc.")
@@ -1128,19 +1103,7 @@ with st.form("formulario_simulacion"):
         },
         key="lump_editor",
     )
-    lump_preview = lump_df.copy()
-    if not lump_preview.empty:
-        lump_preview["monto_clp_num"] = lump_preview["monto_clp"].apply(parse_clp_value)
-        lump_preview = lump_preview[lump_preview["monto_clp_num"] != 0].copy()
-        if not lump_preview.empty:
-            lump_preview["monto_formato"] = lump_preview["monto_clp_num"].apply(fmt_clp)
-            lump_preview["equivalente_mm"] = lump_preview["monto_clp_num"].apply(fmt_mm_from_clp)
-            st.caption("Vista con separadores")
-            st.dataframe(
-                lump_preview[["descripcion", "tipo", "edad_evento", "monto_formato", "equivalente_mm"]],
-                width="stretch",
-                hide_index=True,
-            )
+    # Se eliminó la vista duplicada con separadores bajo el editor.
     panel_end()
 
     panel_start("6. Retorno, riesgo y simulación", "El modo mensual IID captura mejor el riesgo de secuencia durante el retiro; el anual suavizado replica mejor el código original.")
@@ -1536,28 +1499,8 @@ with tab2:
             st.markdown(f"""<div class="definition-card"><b>Pensión nominal inicio</b><br><span>{fmt_clp(afp['pension_mensual_nominal_inicio_clp'])}</span></div>""", unsafe_allow_html=True)
         with afp_cols[3]:
             st.markdown(f"""<div class="definition-card"><b>Supuestos</b><br><span>retorno real {fmt_pct(afp['retorno_real_anual']*100)} · retiro {fmt_pct(afp['tasa_retiro_anual']*100)}</span></div>""", unsafe_allow_html=True)
-    if result.get("saving_range_rows"):
-        st.write("Tramos de ahorro aplicados")
-        sav_events = pd.DataFrame(result["saving_range_rows"])
-        sav_events["ahorro_min_clp"] = sav_events["ahorro_min_mm"].apply(fmt_clp_from_mm)
-        sav_events["ahorro_probable_clp"] = sav_events["ahorro_mode_mm"].apply(fmt_clp_from_mm)
-        sav_events["ahorro_max_clp"] = sav_events["ahorro_max_mm"].apply(fmt_clp_from_mm)
-        st.dataframe(
-            sav_events[["descripcion", "edad_inicio", "edad_fin", "ahorro_min_clp", "ahorro_probable_clp", "ahorro_max_clp", "mes_inicio", "mes_fin"]],
-            width="stretch",
-            hide_index=True,
-        )
-    if result.get("recurring_event_rows"):
-        st.write("Flujos recurrentes aplicados")
-        rec_events = pd.DataFrame(result["recurring_event_rows"])
-        rec_events["monto_base_clp"] = rec_events["monto_mensual_mm"].apply(fmt_clp_from_mm)
-        rec_events["monto_inicio_nominal_clp"] = rec_events["monto_inicio_nominal_mm"].apply(fmt_clp_from_mm)
-        rec_events["monto_fin_nominal_clp"] = rec_events["monto_fin_nominal_mm"].apply(fmt_clp_from_mm)
-        st.dataframe(
-            rec_events[["descripcion", "edad_inicio", "edad_fin", "monto_base_clp", "monto_inicio_nominal_clp", "monto_fin_nominal_clp", "indexado_inflacion", "mes_inicio", "mes_fin"]],
-            width="stretch",
-            hide_index=True,
-        )
+    # Se eliminaron las tablas/vistas auxiliares con montos formateados bajo el gráfico de flujos.
+    # El detalle numérico queda disponible en el tab "Tablas" y en los CSV descargables.
 
 with tab3:
     n_sample = st.slider("Paths a mostrar", min_value=50, max_value=1_000, value=300, step=50)

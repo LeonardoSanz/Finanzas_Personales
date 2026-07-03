@@ -134,3 +134,9 @@ streamlit run app_montecarlo_retiro.py
 ## Nota
 
 Esto es una herramienta de simulación y no una recomendación financiera.
+
+## Corrección rápida - 03 jul 2026
+
+- Corregido error `KeyError: monto_inicio_nominal_mm` asociado a resultados/caché de flujos recurrentes.
+- Eliminadas las vistas duplicadas con separadores bajo los editores de ahorro, flujos recurrentes y flujos esporádicos.
+- Eliminadas las tablas auxiliares bajo el gráfico de flujos para dejar la pantalla más limpia. El detalle sigue disponible en el tab **Tablas** y en las descargas CSV.
