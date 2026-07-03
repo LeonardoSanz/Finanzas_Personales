@@ -77,6 +77,67 @@ def fmt_clp_from_mm(value_mm: float | int) -> str:
     return fmt_clp(mm_to_clp(value_mm))
 
 
+def fmt_mm_from_clp(value_clp: float | int, decimals: int = 1) -> str:
+    """Muestra la equivalencia en millones con separadores locales."""
+    if value_clp is None or (isinstance(value_clp, float) and np.isnan(value_clp)):
+        return "N/A"
+    value_mm = float(value_clp) / 1_000_000
+    if abs(value_mm - round(value_mm)) < 1e-9:
+        return f"{fmt_int_dot(value_mm)} MM"
+    text = f"{value_mm:,.{decimals}f}"
+    text = text.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{text} MM"
+
+
+def parse_clp_value(value, default: int = 0) -> int:
+    """
+    Convierte entradas tipo '$1.000.000', '1000000', '3 MM' o '3,5 MM' a CLP enteros.
+    Mantiene la UI con separadores de miles sin romper los cálculos internos.
+    """
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return int(default)
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        return int(round(float(value)))
+
+    raw = str(value).strip().lower()
+    if raw == "":
+        return int(default)
+
+    is_mm = ("mm" in raw) or ("mill" in raw)
+    keep = "".join(ch for ch in raw if ch.isdigit() or ch in ",.-")
+    if keep in {"", "-", ".", ","}:
+        return int(default)
+
+    try:
+        if is_mm:
+            # Para montos escritos como 3,5 MM o 3.5 MM.
+            normalized = keep.replace(".", "").replace(",", ".") if "," in keep else keep
+            amount = float(normalized) * 1_000_000
+        else:
+            # CLP sin decimales: puntos/comas se asumen como separadores de miles.
+            normalized = keep.replace(".", "").replace(",", "")
+            amount = float(normalized)
+        return int(round(amount))
+    except ValueError:
+        return int(default)
+
+
+def money_text_input(label: str, value: int, *, key: str, help: str | None = None) -> int:
+    """Input de dinero con separadores visibles. Streamlit number_input no agrupa miles de forma consistente."""
+    text = st.text_input(
+        label,
+        value=fmt_int_dot(value),
+        key=key,
+        help=help,
+        placeholder="ej: 1.000.000.000",
+    )
+    parsed = max(parse_clp_value(text, default=value), 0)
+    st.caption(f"= {fmt_clp(parsed)} · {fmt_mm_from_clp(parsed)}")
+    return parsed
+
+
 def fmt_pct(x: float, decimals: int = 1) -> str:
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return "N/A"
@@ -85,6 +146,34 @@ def fmt_pct(x: float, decimals: int = 1) -> str:
 
 def mm_series_to_clp(series: pd.Series) -> pd.Series:
     return (series.astype(float) * 1_000_000).round(0).astype("Int64")
+
+
+def future_value_monthly_real_clp(
+    initial_balance_clp: float,
+    monthly_contribution_clp: float,
+    annual_real_return: float,
+    n_months: int,
+    contribution_timing: str = "end",
+) -> float:
+    """
+    Valor futuro en pesos de hoy usando retorno real.
+    Sirve para estimar una pensión AFP en UF/pesos reales y luego indexarla por inflación.
+    """
+    initial_balance_clp = max(float(initial_balance_clp), 0.0)
+    monthly_contribution_clp = max(float(monthly_contribution_clp), 0.0)
+    n_months = max(int(n_months), 0)
+    rm = (1 + annual_real_return) ** (1 / 12) - 1
+
+    if n_months == 0:
+        return initial_balance_clp
+    if abs(rm) < 1e-14:
+        return initial_balance_clp + monthly_contribution_clp * n_months
+
+    fv_capital = initial_balance_clp * (1 + rm) ** n_months
+    fv_contrib = monthly_contribution_clp * (((1 + rm) ** n_months - 1) / rm)
+    if contribution_timing == "begin":
+        fv_contrib *= (1 + rm)
+    return fv_capital + fv_contrib
 
 
 # ============================================================
@@ -458,57 +547,159 @@ def plot_percentile_fan(tabla: pd.DataFrame, edad_inicio_retiro: int, target_clp
 
 
 def plot_cashflow_schedule(result: dict) -> go.Figure:
-    inputs = result["inputs"]
-    edad_inicial = inputs["edad_inicial"]
-    months = inputs["months"]
-    x = edad_inicial + (np.arange(months) + 1) / 12
+    """
+    Gráfico de flujos más legible:
+    - Barras positivas: plata que entra cada mes.
+    - Barras negativas: plata que sale cada mes.
+    - Línea morada: flujo neto mensual recurrente antes del retorno.
+    - Diamantes naranjos: flujos esporádicos acumulados durante esa edad/año.
 
-    ahorro_clp = result["monthly_savings_mm"].mean(axis=0) * 1_000_000
-    retiro_clp = -result["withdrawal_schedule_mm"] * 1_000_000
-    recurrente_clp = result["recurring_cashflows_mm"] * 1_000_000
-    extra_clp = result["lump_sums_mm"] * 1_000_000
-    neto_clp = ahorro_clp + retiro_clp + recurrente_clp + extra_clp
+    Se agrupa por edad/año para no mostrar cientos de puntos mensuales que se pisan.
+    """
+    inputs = result["inputs"]
+    edad_inicial = int(inputs["edad_inicial"])
+    months = int(inputs["months"])
+    ages_monthly = edad_inicial + np.arange(months) / 12
+    age_bucket = np.floor(ages_monthly).astype(int)
+
+    savings_mean = result.get("monthly_savings_mean_mm")
+    if savings_mean is None:
+        old_savings = result.get("monthly_savings_mm")
+        savings_mean = np.zeros(months) if old_savings is None else old_savings.mean(axis=0)
+
+    savings_clp = np.asarray(savings_mean, dtype=float) * 1_000_000
+    withdrawal_clp = -np.asarray(result["withdrawal_schedule_mm"], dtype=float) * 1_000_000
+    recurring = np.asarray(result["recurring_cashflows_mm"], dtype=float) * 1_000_000
+    recurring_in_clp = np.maximum(recurring, 0)
+    recurring_out_clp = np.minimum(recurring, 0)
+    lump_clp = np.asarray(result["lump_sums_mm"], dtype=float) * 1_000_000
+
+    df = pd.DataFrame(
+        {
+            "edad": age_bucket,
+            "ahorro_mensual": savings_clp,
+            "retiro_mensual": withdrawal_clp,
+            "ingreso_recurrente": recurring_in_clp,
+            "egreso_recurrente": recurring_out_clp,
+            "extra_anual": lump_clp,
+        }
+    )
+    grouped = df.groupby("edad", as_index=False).agg(
+        ahorro_mensual=("ahorro_mensual", "mean"),
+        retiro_mensual=("retiro_mensual", "mean"),
+        ingreso_recurrente=("ingreso_recurrente", "mean"),
+        egreso_recurrente=("egreso_recurrente", "mean"),
+        extra_anual=("extra_anual", "sum"),
+    )
+    grouped["neto_mensual_recurrente"] = (
+        grouped["ahorro_mensual"]
+        + grouped["retiro_mensual"]
+        + grouped["ingreso_recurrente"]
+        + grouped["egreso_recurrente"]
+    )
 
     fig = go.Figure()
-    series = [
-        (ahorro_clp, "Ahorro promedio", COLOR_GOOD),
-        (retiro_clp, "Retiro fijo", COLOR_BAD),
-        (recurrente_clp, "Ingresos/egresos recurrentes", COLOR_CYAN),
-        (extra_clp, "Flujos esporádicos", COLOR_ORANGE),
-        (neto_clp, "Flujo neto antes de retorno", COLOR_PRIMARY_2),
+    bar_series = [
+        ("ahorro_mensual", "Ahorro mensual", COLOR_GOOD),
+        ("ingreso_recurrente", "Ingresos recurrentes", COLOR_CYAN),
+        ("retiro_mensual", "Retiro mensual", COLOR_BAD),
+        ("egreso_recurrente", "Egresos recurrentes", COLOR_ORANGE),
     ]
-    for y, name, color in series:
+    for col, name, color in bar_series:
         fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=y,
-                mode="lines",
+            go.Bar(
+                x=grouped["edad"],
+                y=grouped[col],
                 name=name,
-                line={"width": 3 if name == "Flujo neto antes de retorno" else 2, "color": color},
-                hovertemplate="Edad %{x:.1f}<br>Flujo $%{y:,.0f}<extra>" + name + "</extra>",
+                marker_color=color,
+                opacity=0.82,
+                hovertemplate="Edad %{x}<br>" + name + " $%{y:,.0f}<extra></extra>",
             )
         )
 
-    fig.add_hline(y=0, line_dash="solid", line_color="rgba(255,255,255,0.25)")
-    fig.add_vline(x=inputs["edad_inicio_retiro"], line_dash="dash", line_color=COLOR_CYAN, annotation_text="inicio retiro")
+    fig.add_trace(
+        go.Scatter(
+            x=grouped["edad"],
+            y=grouped["neto_mensual_recurrente"],
+            name="Neto mensual antes de retorno",
+            mode="lines+markers",
+            line={"width": 4, "color": COLOR_PRIMARY_2},
+            marker={"size": 7, "color": COLOR_PRIMARY_2},
+            hovertemplate="Edad %{x}<br>Neto mensual $%{y:,.0f}<extra></extra>",
+        )
+    )
 
-    # Etiquetas de números al final del calendario
-    for y, name, color in [
-        (ahorro_clp, "ahorro", COLOR_GOOD),
-        (retiro_clp, "retiro", COLOR_BAD),
-        (recurrente_clp, "recurrente", COLOR_CYAN),
-    ]:
-        nonzero = np.where(np.abs(y) > 1)[0]
-        if len(nonzero) > 0:
-            idx = nonzero[-1]
-            add_value_annotation(fig, float(x[idx]), float(y[idx]), f"{name}<br>{fmt_clp(y[idx])}", color, yshift=10)
+    # Los esporádicos son totales anuales, no montos mensuales. Por eso van como diamantes.
+    extras = grouped[np.abs(grouped["extra_anual"]) > 1]
+    if not extras.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=extras["edad"],
+                y=extras["extra_anual"],
+                name="Flujos esporádicos del año",
+                mode="markers+text",
+                marker={"size": 12, "symbol": "diamond", "color": COLOR_ORANGE},
+                text=[fmt_clp(v) for v in extras["extra_anual"]],
+                textposition="top center",
+                hovertemplate="Edad %{x}<br>Flujo esporádico anual $%{y:,.0f}<extra></extra>",
+            )
+        )
+
+    fig.add_hline(y=0, line_dash="solid", line_color="rgba(255,255,255,0.28)")
+    fig.add_vline(
+        x=inputs["edad_inicio_retiro"],
+        line_dash="dash",
+        line_color=COLOR_CYAN,
+        annotation_text="inicio retiro",
+        annotation_position="top left",
+    )
+
+    # Etiquetas clave al final, separadas para evitar que se pisen.
+    if len(grouped) > 0:
+        final = grouped.iloc[-1]
+        final_age = float(final["edad"])
+        add_value_annotation(
+            fig,
+            final_age,
+            float(final["retiro_mensual"]),
+            f"retiro<br>{fmt_clp(final['retiro_mensual'])}",
+            COLOR_BAD,
+            yshift=-34,
+        )
+        add_value_annotation(
+            fig,
+            final_age,
+            float(final["ingreso_recurrente"]),
+            f"ingresos<br>{fmt_clp(final['ingreso_recurrente'])}",
+            COLOR_CYAN,
+            yshift=28,
+        )
+        add_value_annotation(
+            fig,
+            final_age,
+            float(final["neto_mensual_recurrente"]),
+            f"neto<br>{fmt_clp(final['neto_mensual_recurrente'])}",
+            COLOR_PRIMARY_2,
+            yshift=0,
+        )
 
     fig.update_layout(
-        title="Calendario mensual de flujos: plata que entra y sale",
+        title="Flujo mensual promedio por edad: entradas, salidas y brecha que cubre el patrimonio",
         xaxis_title="Edad",
-        yaxis_title="Flujo mensual (CLP)",
+        yaxis_title="Flujo mensual / flujo esporádico anual (CLP)",
         hovermode="x unified",
-        legend_title="Flujo",
+        legend_title="Concepto",
+        barmode="relative",
+    )
+    fig.add_annotation(
+        xref="paper",
+        yref="paper",
+        x=0,
+        y=1.10,
+        showarrow=False,
+        align="left",
+        text="Barras sobre cero = plata que entra. Barras bajo cero = plata que sale. Línea morada = neto mensual recurrente antes del retorno. Diamantes = flujos únicos del año.",
+        font={"size": 12, "color": COLOR_MUTED},
     )
     return apply_plot_theme(fig)
 
@@ -580,8 +771,30 @@ def plot_final_distribution(result: dict) -> go.Figure:
     )
     fig.update_traces(marker_line_width=0.3, marker_line_color="rgba(255,255,255,0.20)")
     fig.update_layout(showlegend=False)
-    for value, label, color in [(p5, "P5", COLOR_BAD), (p50, "P50", COLOR_CYAN), (p95, "P95", COLOR_PRIMARY_2)]:
-        fig.add_vline(x=value, line_dash="dash", line_color=color, annotation_text=f"{label}: {fmt_clp(value)}")
+
+    # Cortes separados verticalmente para no taparse.
+    cuts = [
+        (p5, "P5", COLOR_BAD, 1.08),
+        (p50, "P50", COLOR_CYAN, 1.00),
+        (p95, "P95", COLOR_PRIMARY_2, 0.92),
+    ]
+    for value, label, color, ypaper in cuts:
+        fig.add_vline(x=value, line_dash="dash", line_color=color, line_width=3 if label == "P50" else 2)
+        fig.add_annotation(
+            x=value,
+            y=ypaper,
+            xref="x",
+            yref="paper",
+            text=f"{label}<br>{fmt_clp(value)}",
+            showarrow=False,
+            xanchor="left",
+            align="left",
+            font={"color": color, "size": 12},
+            bgcolor="rgba(6, 24, 68, 0.88)",
+            bordercolor="rgba(255,255,255,0.18)",
+            borderwidth=1,
+        )
+    fig.update_layout(margin={"l": 72, "r": 36, "t": 100, "b": 54})
     return apply_plot_theme(fig, y_currency=False, x_currency=True)
 
 
@@ -673,9 +886,11 @@ st.markdown(
             qué ingresos recurrentes entran después y si el patrimonio llega vivo a los {EDAD_FINAL_FIJA} años.
         </div>
         <div class="quant-pill-row">
-            <div class="quant-pill">Montos con todos los ceros</div>
+            <div class="quant-pill">Montos con separador de miles: $1.000.000.000</div>
             <div class="quant-pill">Edad final fija: {EDAD_FINAL_FIJA}</div>
-            <div class="quant-pill">Jubilación y arriendos recurrentes</div>
+            <div class="quant-pill">Ahorro por tramos de edad</div>
+            <div class="quant-pill">Jubilación AFP calculada</div>
+            <div class="quant-pill">Arriendos indexados a inflación</div>
             <div class="quant-pill">Flujos esporádicos</div>
             <div class="quant-pill">Percentiles Monte Carlo</div>
         </div>
@@ -689,7 +904,7 @@ st.markdown(
 # ============================================================
 
 with st.form("formulario_simulacion"):
-    panel_start("1. Supuestos base", "Edad final fija en 90 años. Todos los montos se ingresan en CLP, con todos los ceros.")
+    panel_start("1. Supuestos base", "Edad final fija en 90 años. Todos los montos se ingresan en CLP con separadores: 1.000.000.000.")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         edad_inicial = st.number_input("Edad inicial", min_value=18, max_value=89, value=28, step=1)
@@ -706,86 +921,229 @@ with st.form("formulario_simulacion"):
             help="Desde esta edad el ahorro mensual se vuelve cero y comienza el retiro fijo mensual.",
         )
     with c4:
-        target_clp = st.number_input(
+        target_clp = money_text_input(
             "Meta patrimonial CLP",
-            min_value=0,
-            value=1_000_000_000,
-            step=50_000_000,
-            format="%d",
+            1_000_000_000,
+            key="target_clp_text",
+            help="Puedes escribir 1.000.000.000 o 1.000 MM.",
         )
 
     c5, c6, c7, c8 = st.columns(4)
     with c5:
-        initial_capital_clp = st.number_input("Capital inicial CLP", min_value=0, value=50_000_000, step=1_000_000, format="%d")
+        initial_capital_clp = money_text_input("Capital inicial CLP", 50_000_000, key="initial_capital_clp_text")
     with c6:
-        withdrawal_monthly_clp = st.number_input("Retiro mensual fijo CLP", min_value=0, value=3_000_000, step=100_000, format="%d")
+        withdrawal_monthly_clp = money_text_input("Retiro mensual fijo CLP", 3_000_000, key="withdrawal_monthly_clp_text")
     with c7:
         withdrawal_indexed_to_inflation = st.checkbox("Indexar retiro por inflación", value=False)
     with c8:
         inflation_annual_pct = st.number_input("Inflación anual indexación (%)", min_value=0.0, value=3.0, step=0.25)
     panel_end()
 
-    panel_start("2. Ahorro mensual antes del retiro", "Se modela como distribución triangular: mínimo, más probable y máximo. Desde la edad de retiro el ahorro queda en cero.")
-    a1, a2, a3, a4 = st.columns(4)
-    with a1:
-        monthly_saving_min_clp = st.number_input("Ahorro mínimo CLP", min_value=0, value=2_500_000, step=100_000, format="%d")
-    with a2:
-        monthly_saving_mode_clp = st.number_input("Ahorro más probable CLP", min_value=0, value=3_000_000, step=100_000, format="%d")
-    with a3:
-        monthly_saving_max_clp = st.number_input("Ahorro máximo CLP", min_value=0, value=3_500_000, step=100_000, format="%d")
-    with a4:
+    panel_start("2. Rangos de ahorro mensual por edad", "Cada tramo usa una distribución triangular: mínimo, más probable y máximo. Desde la edad de retiro el ahorro queda automáticamente en cero.")
+    t1, t2 = st.columns([3, 1])
+    with t1:
+        st.caption("Ejemplo: de ahora a 30 puedes ahorrar X, de 30 a 40 otro monto por hijos, y luego otro tramo hasta el retiro.")
+    with t2:
         contribution_timing_es = st.selectbox("Timing ahorro", ["Fin de mes", "Inicio de mes"], index=0)
+
+    default_saving_rows = []
+    if int(edad_inicio_retiro) > int(edad_inicial):
+        # Tramo 1: desde hoy hasta 30, si aplica.
+        if int(edad_inicial) < 30:
+            default_saving_rows.append(
+                {
+                    "descripcion": "Etapa actual",
+                    "edad_inicio": int(edad_inicial),
+                    "edad_fin": min(30, int(edad_inicio_retiro)),
+                    "ahorro_min_clp": "2.500.000",
+                    "ahorro_probable_clp": "3.000.000",
+                    "ahorro_max_clp": "3.500.000",
+                }
+            )
+        # Tramo 2: 30 a 40, pensado para hijos / menor ahorro.
+        if int(edad_inicio_retiro) > max(30, int(edad_inicial)):
+            default_saving_rows.append(
+                {
+                    "descripcion": "Hijos / menor ahorro",
+                    "edad_inicio": max(30, int(edad_inicial)),
+                    "edad_fin": min(40, int(edad_inicio_retiro)),
+                    "ahorro_min_clp": "1.000.000",
+                    "ahorro_probable_clp": "1.500.000",
+                    "ahorro_max_clp": "2.000.000",
+                }
+            )
+        # Tramo 3: desde 40 hasta retiro, si aplica.
+        if int(edad_inicio_retiro) > max(40, int(edad_inicial)):
+            default_saving_rows.append(
+                {
+                    "descripcion": "Recuperación ahorro",
+                    "edad_inicio": max(40, int(edad_inicial)),
+                    "edad_fin": int(edad_inicio_retiro),
+                    "ahorro_min_clp": "2.000.000",
+                    "ahorro_probable_clp": "2.500.000",
+                    "ahorro_max_clp": "3.000.000",
+                }
+            )
+    if not default_saving_rows:
+        default_saving_rows.append(
+            {
+                "descripcion": "Sin ahorro previo al retiro",
+                "edad_inicio": int(edad_inicial),
+                "edad_fin": min(int(edad_inicial) + 1, EDAD_FINAL_FIJA),
+                "ahorro_min_clp": "0",
+                "ahorro_probable_clp": "0",
+                "ahorro_max_clp": "0",
+            }
+        )
+    default_saving_df = pd.DataFrame(default_saving_rows)
+    saving_ranges_df = st.data_editor(
+        default_saving_df,
+        num_rows="dynamic",
+        width="stretch",
+        column_config={
+            "descripcion": st.column_config.TextColumn("Descripción"),
+            "edad_inicio": st.column_config.NumberColumn("Edad inicio", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
+            "edad_fin": st.column_config.NumberColumn("Edad fin", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
+            "ahorro_min_clp": st.column_config.TextColumn("Ahorro mínimo CLP", help="Ej: 1.000.000 o 1 MM"),
+            "ahorro_probable_clp": st.column_config.TextColumn("Ahorro más probable CLP", help="Ej: 1.500.000 o 1,5 MM"),
+            "ahorro_max_clp": st.column_config.TextColumn("Ahorro máximo CLP", help="Ej: 2.000.000 o 2 MM"),
+        },
+        key="saving_ranges_editor",
+    )
+    saving_preview = saving_ranges_df.copy()
+    if not saving_preview.empty:
+        saving_preview["min_num"] = saving_preview["ahorro_min_clp"].apply(parse_clp_value)
+        saving_preview["prob_num"] = saving_preview["ahorro_probable_clp"].apply(parse_clp_value)
+        saving_preview["max_num"] = saving_preview["ahorro_max_clp"].apply(parse_clp_value)
+        saving_preview = saving_preview[(saving_preview["min_num"] != 0) | (saving_preview["prob_num"] != 0) | (saving_preview["max_num"] != 0)].copy()
+        if not saving_preview.empty:
+            saving_preview["min_formato"] = saving_preview["min_num"].apply(fmt_clp)
+            saving_preview["probable_formato"] = saving_preview["prob_num"].apply(fmt_clp)
+            saving_preview["max_formato"] = saving_preview["max_num"].apply(fmt_clp)
+            st.caption("Vista con separadores. Los tramos que pasen la edad de retiro se cortan automáticamente al iniciar retiro.")
+            st.dataframe(
+                saving_preview[["descripcion", "edad_inicio", "edad_fin", "min_formato", "probable_formato", "max_formato"]],
+                width="stretch",
+                hide_index=True,
+            )
     panel_end()
 
-    panel_start("3. Ingresos o egresos mensuales recurrentes", "Ejemplos: jubilación, arriendo de propiedades, dividendo, gastos familiares. Se aplican todos los meses desde la edad indicada.")
+    panel_start(
+        "3. Jubilación AFP estimada",
+        "Calcula una pensión real aproximada: saldo AFP + ahorro mensual AFP a retorno real, y luego retiro anual como % del saldo al jubilar. La pensión se indexa por inflación para que sea comparable con el retiro indexado."
+    )
+    afp_enable = st.checkbox("Agregar jubilación AFP calculada como ingreso recurrente", value=True)
+    afp1, afp2, afp3, afp4, afp5 = st.columns(5)
+    with afp1:
+        afp_balance_clp = money_text_input("Saldo AFP actual CLP", 0, key="afp_balance_clp_text")
+    with afp2:
+        afp_monthly_contribution_clp = money_text_input("Ahorro mensual AFP CLP", 0, key="afp_monthly_contribution_clp_text")
+    with afp3:
+        afp_retirement_age = st.number_input("Edad jubilación AFP", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, value=min(max(65, int(edad_inicial)), EDAD_FINAL_FIJA), step=1)
+    with afp4:
+        afp_real_return_pct = st.number_input("Retorno real AFP anual (%)", min_value=-5.0, max_value=15.0, value=5.0, step=0.25)
+    with afp5:
+        afp_withdrawal_rate_pct = st.number_input("Tasa retiro AFP anual (%)", min_value=0.0, max_value=10.0, value=3.2, step=0.1)
+
+    months_to_afp = max(int(round((float(afp_retirement_age) - float(edad_inicial)) * 12)), 0)
+    afp_fv_real_clp = future_value_monthly_real_clp(
+        initial_balance_clp=afp_balance_clp,
+        monthly_contribution_clp=afp_monthly_contribution_clp,
+        annual_real_return=float(afp_real_return_pct) / 100,
+        n_months=months_to_afp,
+        contribution_timing="end",
+    )
+    afp_monthly_pension_real_clp = afp_fv_real_clp * (float(afp_withdrawal_rate_pct) / 100) / 12
+    afp_monthly_inflation = (1 + float(inflation_annual_pct) / 100) ** (1 / 12) - 1 if float(inflation_annual_pct) > -100 else 0.0
+    afp_monthly_pension_nominal_start_clp = afp_monthly_pension_real_clp * (1 + afp_monthly_inflation) ** months_to_afp
+
+    ap1, ap2, ap3 = st.columns(3)
+    with ap1:
+        st.markdown(f"""<div class="definition-card"><b>Saldo AFP estimado al jubilar</b><br><span>{fmt_clp(afp_fv_real_clp)} en pesos de hoy</span></div>""", unsafe_allow_html=True)
+    with ap2:
+        st.markdown(f"""<div class="definition-card"><b>Pensión mensual real estimada</b><br><span>{fmt_clp(afp_monthly_pension_real_clp)} en pesos de hoy</span></div>""", unsafe_allow_html=True)
+    with ap3:
+        st.markdown(f"""<div class="definition-card"><b>Pensión nominal al inicio</b><br><span>{fmt_clp(afp_monthly_pension_nominal_start_clp)} a los {int(afp_retirement_age)} años</span></div>""", unsafe_allow_html=True)
+    st.caption("La pensión se agrega como ingreso recurrente indexado por inflación desde hoy. Si el ahorro AFP ya está incluido dentro de tus tramos de ahorro patrimonial, evita duplicarlo.")
+    panel_end()
+
+    panel_start("4. Otros ingresos o egresos mensuales recurrentes", "Ejemplos: arriendo de propiedades, dividendo, gastos familiares. Puedes marcar indexación para que el monto escrito en pesos de hoy crezca con inflación.")
     default_recurring_df = pd.DataFrame(
         {
-            "descripcion": ["Jubilación", "Arriendo propiedades"],
-            "tipo": ["Ingreso", "Ingreso"],
-            "edad_inicio": [65, 40],
-            "edad_fin": [90, 90],
-            "monto_mensual_clp": [0, 0],
+            "descripcion": ["Arriendo propiedades", "Otro ingreso", "Gasto familiar"],
+            "tipo": ["Ingreso", "Ingreso", "Egreso"],
+            "edad_inicio": [max(40, int(edad_inicial)), max(65, int(edad_inicial)), max(30, int(edad_inicial))],
+            "edad_fin": [90, 90, 90],
+            "monto_mensual_clp": ["0", "0", "0"],
+            "indexar_inflacion": [True, True, True],
         }
     )
     recurring_df = st.data_editor(
         default_recurring_df,
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         column_config={
             "descripcion": st.column_config.TextColumn("Descripción"),
             "tipo": st.column_config.SelectboxColumn("Tipo", options=["Ingreso", "Egreso"], required=True),
             "edad_inicio": st.column_config.NumberColumn("Edad inicio", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
             "edad_fin": st.column_config.NumberColumn("Edad fin", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
-            "monto_mensual_clp": st.column_config.NumberColumn("Monto mensual CLP", min_value=0, step=100_000, format="%d"),
+            "monto_mensual_clp": st.column_config.TextColumn("Monto mensual CLP", help="Escribe con separadores, por ejemplo 1.200.000 o 1,2 MM. Si marcas indexación, se interpreta como pesos de hoy."),
+            "indexar_inflacion": st.column_config.CheckboxColumn("Indexar inflación", help="Si está marcado, el monto crece con inflación desde hoy."),
         },
         key="recurring_editor",
     )
+    rec_preview = recurring_df.copy()
+    if not rec_preview.empty:
+        rec_preview["monto_mensual_clp_num"] = rec_preview["monto_mensual_clp"].apply(parse_clp_value)
+        rec_preview = rec_preview[rec_preview["monto_mensual_clp_num"] != 0].copy()
+        if not rec_preview.empty:
+            rec_preview["monto_mensual_formato"] = rec_preview["monto_mensual_clp_num"].apply(fmt_clp)
+            rec_preview["equivalente_mm"] = rec_preview["monto_mensual_clp_num"].apply(fmt_mm_from_clp)
+            st.caption("Vista con separadores")
+            st.dataframe(
+                rec_preview[["descripcion", "tipo", "edad_inicio", "edad_fin", "monto_mensual_formato", "equivalente_mm", "indexar_inflacion"]],
+                width="stretch",
+                hide_index=True,
+            )
     panel_end()
 
-    panel_start("4. Flujos esporádicos", "Plata que entra o sale una sola vez: bono, venta de activo, pie de propiedad, gasto grande, herencia, prepago, etc.")
+    panel_start("5. Flujos esporádicos", "Plata que entra o sale una sola vez: bono, venta de activo, pie de propiedad, gasto grande, herencia, prepago, etc.")
     default_lump_df = pd.DataFrame(
         {
             "descripcion": ["Ejemplo bono / venta activo"],
             "tipo": ["Ingreso"],
             "edad_evento": [40],
-            "monto_clp": [0],
+            "monto_clp": ["0"],
         }
     )
     lump_df = st.data_editor(
         default_lump_df,
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         column_config={
             "descripcion": st.column_config.TextColumn("Descripción"),
             "tipo": st.column_config.SelectboxColumn("Tipo", options=["Ingreso", "Egreso"], required=True),
             "edad_evento": st.column_config.NumberColumn("Edad evento", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
-            "monto_clp": st.column_config.NumberColumn("Monto CLP", min_value=0, step=1_000_000, format="%d"),
+            "monto_clp": st.column_config.TextColumn("Monto CLP", help="Escribe con separadores, por ejemplo 25.000.000 o 25 MM."),
         },
         key="lump_editor",
     )
+    lump_preview = lump_df.copy()
+    if not lump_preview.empty:
+        lump_preview["monto_clp_num"] = lump_preview["monto_clp"].apply(parse_clp_value)
+        lump_preview = lump_preview[lump_preview["monto_clp_num"] != 0].copy()
+        if not lump_preview.empty:
+            lump_preview["monto_formato"] = lump_preview["monto_clp_num"].apply(fmt_clp)
+            lump_preview["equivalente_mm"] = lump_preview["monto_clp_num"].apply(fmt_mm_from_clp)
+            st.caption("Vista con separadores")
+            st.dataframe(
+                lump_preview[["descripcion", "tipo", "edad_evento", "monto_formato", "equivalente_mm"]],
+                width="stretch",
+                hide_index=True,
+            )
     panel_end()
 
-    panel_start("5. Retorno, riesgo y simulación", "El modo mensual IID captura mejor el riesgo de secuencia durante el retiro; el anual suavizado replica mejor el código original.")
+    panel_start("6. Retorno, riesgo y simulación", "El modo mensual IID captura mejor el riesgo de secuencia durante el retiro; el anual suavizado replica mejor el código original.")
     r1, r2, r3, r4, r5 = st.columns(5)
     with r1:
         return_model_es = st.selectbox("Modelo retorno", ["Mensual IID más realista para retiro", "Anual suavizado como código original"], index=0)
@@ -821,7 +1179,7 @@ def parse_lump_events(df: pd.DataFrame, edad_inicial_: int, edad_final_: int) ->
     if df is None or df.empty:
         return tuple(events)
     for _, row in df.dropna(subset=["edad_evento", "monto_clp"]).iterrows():
-        amount_clp = float(row.get("monto_clp", 0) or 0)
+        amount_clp = parse_clp_value(row.get("monto_clp", 0))
         if amount_clp == 0:
             continue
         age = float(row["edad_evento"])
@@ -834,12 +1192,12 @@ def parse_lump_events(df: pd.DataFrame, edad_inicial_: int, edad_final_: int) ->
     return tuple(events)
 
 
-def parse_recurring_events(df: pd.DataFrame, edad_inicial_: int, edad_final_: int) -> tuple[tuple[float, Optional[float], float, str], ...]:
-    events: list[tuple[float, Optional[float], float, str]] = []
+def parse_recurring_events(df: pd.DataFrame, edad_inicial_: int, edad_final_: int) -> tuple[tuple, ...]:
+    events: list[tuple] = []
     if df is None or df.empty:
         return tuple(events)
     for _, row in df.dropna(subset=["edad_inicio", "monto_mensual_clp"]).iterrows():
-        amount_clp = float(row.get("monto_mensual_clp", 0) or 0)
+        amount_clp = parse_clp_value(row.get("monto_mensual_clp", 0))
         if amount_clp == 0:
             continue
         start_age = float(row["edad_inicio"])
@@ -851,14 +1209,55 @@ def parse_recurring_events(df: pd.DataFrame, edad_inicial_: int, edad_final_: in
             continue
         sign = 1.0 if str(row.get("tipo", "Ingreso")) == "Ingreso" else -1.0
         description = str(row.get("descripcion", "Flujo recurrente"))
-        events.append((start_age, end_age, sign * clp_to_mm(amount_clp), description))
+        indexed_raw = row.get("indexar_inflacion", False)
+        indexed = bool(indexed_raw) if pd.notna(indexed_raw) else False
+        # edad_base_indexacion = edad inicial: el monto se interpreta como pesos de hoy.
+        events.append((start_age, end_age, sign * clp_to_mm(amount_clp), description, indexed, float(edad_inicial_)))
     return tuple(events)
+
+
+def parse_saving_ranges(df: pd.DataFrame, edad_inicial_: int, edad_retiro_: int) -> tuple[tuple[float, Optional[float], float, float, float, str], ...]:
+    """Convierte la tabla de tramos de ahorro a MM CLP para el motor."""
+    ranges: list[tuple[float, Optional[float], float, float, float, str]] = []
+    if df is None or df.empty:
+        return tuple(ranges)
+
+    for _, row in df.dropna(subset=["edad_inicio", "edad_fin"]).iterrows():
+        min_clp = parse_clp_value(row.get("ahorro_min_clp", 0))
+        mode_clp = parse_clp_value(row.get("ahorro_probable_clp", 0))
+        max_clp = parse_clp_value(row.get("ahorro_max_clp", 0))
+        if min_clp == 0 and mode_clp == 0 and max_clp == 0:
+            continue
+
+        start_age = float(row["edad_inicio"])
+        end_age = float(row["edad_fin"])
+        start_age = min(max(start_age, edad_inicial_), EDAD_FINAL_FIJA)
+        end_age = min(max(end_age, edad_inicial_), EDAD_FINAL_FIJA)
+        if end_age <= start_age:
+            continue
+
+        description = str(row.get("descripcion", "Tramo ahorro"))
+        ranges.append(
+            (
+                start_age,
+                end_age,
+                clp_to_mm(min_clp),
+                clp_to_mm(mode_clp),
+                clp_to_mm(max_clp),
+                description,
+            )
+        )
+    return tuple(ranges)
 
 
 if submitted:
     errors = []
-    if not (monthly_saving_min_clp <= monthly_saving_mode_clp <= monthly_saving_max_clp):
-        errors.append("Debe cumplirse: ahorro mínimo <= ahorro más probable <= ahorro máximo.")
+    saving_ranges = parse_saving_ranges(saving_ranges_df, int(edad_inicial), int(edad_inicio_retiro))
+    for start_age, end_age, min_mm, mode_mm, max_mm, description in saving_ranges:
+        if not (min_mm <= mode_mm <= max_mm):
+            errors.append(f"En el tramo '{description}' debe cumplirse: ahorro mínimo <= ahorro más probable <= ahorro máximo.")
+        if end_age <= start_age:
+            errors.append(f"En el tramo '{description}' la edad fin debe ser mayor que la edad inicio.")
     if not (annual_return_low_pct < annual_return_mean_pct < annual_return_high_pct):
         errors.append("El retorno esperado debe estar entre el mínimo y el máximo truncado.")
     if edad_inicio_retiro > EDAD_FINAL_FIJA:
@@ -870,7 +1269,30 @@ if submitted:
         st.stop()
 
     lump_events = parse_lump_events(lump_df, int(edad_inicial), EDAD_FINAL_FIJA)
-    recurring_events = parse_recurring_events(recurring_df, int(edad_inicial), EDAD_FINAL_FIJA)
+    recurring_events_list = list(parse_recurring_events(recurring_df, int(edad_inicial), EDAD_FINAL_FIJA))
+    afp_info = {
+        "enabled": bool(afp_enable),
+        "saldo_actual_clp": int(afp_balance_clp),
+        "ahorro_mensual_clp": int(afp_monthly_contribution_clp),
+        "edad_jubilacion": int(afp_retirement_age),
+        "retorno_real_anual": float(afp_real_return_pct) / 100,
+        "tasa_retiro_anual": float(afp_withdrawal_rate_pct) / 100,
+        "saldo_estimado_real_clp": float(afp_fv_real_clp),
+        "pension_mensual_real_clp": float(afp_monthly_pension_real_clp),
+        "pension_mensual_nominal_inicio_clp": float(afp_monthly_pension_nominal_start_clp),
+    }
+    if bool(afp_enable) and afp_monthly_pension_real_clp > 0 and int(afp_retirement_age) < EDAD_FINAL_FIJA:
+        recurring_events_list.append(
+            (
+                float(afp_retirement_age),
+                float(EDAD_FINAL_FIJA),
+                clp_to_mm(afp_monthly_pension_real_clp),
+                "Jubilación estimada AFP",
+                True,
+                float(edad_inicial),
+            )
+        )
+    recurring_events = tuple(recurring_events_list)
     contribution_timing = "end" if contribution_timing_es == "Fin de mes" else "begin"
     withdrawal_timing = "end"
     return_model = "monthly_iid" if return_model_es.startswith("Mensual") else "annual_smooth"
@@ -887,9 +1309,9 @@ if submitted:
                 annual_return_std=float(annual_return_std_pct) / 100,
                 annual_return_low=float(annual_return_low_pct) / 100,
                 annual_return_high=float(annual_return_high_pct) / 100,
-                monthly_saving_min_mm=clp_to_mm(monthly_saving_min_clp),
-                monthly_saving_mode_mm=clp_to_mm(monthly_saving_mode_clp),
-                monthly_saving_max_mm=clp_to_mm(monthly_saving_max_clp),
+                monthly_saving_min_mm=0.0,
+                monthly_saving_mode_mm=0.0,
+                monthly_saving_max_mm=0.0,
                 withdrawal_monthly_mm=clp_to_mm(withdrawal_monthly_clp),
                 contribution_timing=contribution_timing,
                 withdrawal_timing=withdrawal_timing,
@@ -898,11 +1320,13 @@ if submitted:
                 mean_is_effective=bool(mean_is_effective),
                 lump_sum_events=lump_events,
                 recurring_monthly_events=recurring_events,
+                saving_ranges=saving_ranges,
                 floor_zero=bool(floor_zero),
                 return_model=return_model,
                 withdrawal_indexed_to_inflation=bool(withdrawal_indexed_to_inflation),
                 inflation_annual=float(inflation_annual_pct) / 100,
             )
+            result["afp_info"] = afp_info
             tabla = tabla_monte_carlo_por_edad(result)
             st.session_state["mc_result"] = result
             st.session_state["mc_tabla"] = tabla
@@ -910,6 +1334,8 @@ if submitted:
             st.session_state["mc_target_clp"] = target_clp
             st.session_state["mc_recurring_df"] = recurring_df
             st.session_state["mc_lump_df"] = lump_df
+            st.session_state["mc_saving_ranges_df"] = saving_ranges_df
+            st.session_state["mc_afp_info"] = afp_info
     except Exception as exc:
         st.error(f"Error en la simulación: {exc}")
         st.stop()
@@ -1036,6 +1462,28 @@ st.caption(
     f"Modelo de retorno: {return_model_es}. Todos los montos se muestran en CLP."
 )
 
+# Alertas interpretativas para evitar leer mal los resultados.
+if result["inputs"].get("return_model") == "monthly_iid":
+    st.info(
+        "Modo mensual IID: cada mes tiene un shock independiente. Es normal que el patrimonio se vea más castigado "
+        "que en el modo anual suavizado, porque aparece riesgo de secuencia: malos meses justo al empezar a retirar "
+        "pueden dañar mucho más el capital."
+    )
+
+withdrawal_schedule = result["withdrawal_schedule_mm"]
+nonzero_withdrawals = withdrawal_schedule[withdrawal_schedule > 0]
+if result["inputs"].get("withdrawal_indexed_to_inflation") and len(nonzero_withdrawals) > 0:
+    first_w = float(nonzero_withdrawals[0])
+    last_w = float(nonzero_withdrawals[-1])
+    last_rec = float(result["recurring_cashflows_mm"][-1]) if len(result["recurring_cashflows_mm"]) else 0.0
+    gap_last = last_rec - last_w
+    st.warning(
+        f"Ojo con el retiro indexado: el primer retiro es {fmt_clp_from_mm(first_w)} mensual, "
+        f"pero a los {result['inputs']['edad_final']} años llega a {fmt_clp_from_mm(last_w)} mensual. "
+        f"Con ingresos/egresos recurrentes netos indexados de {fmt_clp_from_mm(last_rec)}, "
+        f"la brecha mensual antes de retorno queda en {fmt_clp_from_mm(gap_last)}."
+    )
+
 with st.expander("Qué significa cada métrica", expanded=False):
     d1, d2, d3 = st.columns(3)
     with d1:
@@ -1072,25 +1520,54 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
 )
 
 with tab1:
-    st.plotly_chart(plot_percentile_fan(tabla, int(result["inputs"]["edad_inicio_retiro"]), float(target_clp)), use_container_width=True)
+    st.plotly_chart(plot_percentile_fan(tabla, int(result["inputs"]["edad_inicio_retiro"]), float(target_clp)), width="stretch")
 
 with tab2:
-    st.plotly_chart(plot_cashflow_schedule(result), use_container_width=True)
+    st.plotly_chart(plot_cashflow_schedule(result), width="stretch")
+    if result.get("afp_info", {}).get("enabled"):
+        afp = result["afp_info"]
+        st.write("Jubilación AFP calculada")
+        afp_cols = st.columns(4)
+        with afp_cols[0]:
+            st.markdown(f"""<div class="definition-card"><b>Saldo AFP real al jubilar</b><br><span>{fmt_clp(afp['saldo_estimado_real_clp'])}</span></div>""", unsafe_allow_html=True)
+        with afp_cols[1]:
+            st.markdown(f"""<div class="definition-card"><b>Pensión real mensual</b><br><span>{fmt_clp(afp['pension_mensual_real_clp'])}</span></div>""", unsafe_allow_html=True)
+        with afp_cols[2]:
+            st.markdown(f"""<div class="definition-card"><b>Pensión nominal inicio</b><br><span>{fmt_clp(afp['pension_mensual_nominal_inicio_clp'])}</span></div>""", unsafe_allow_html=True)
+        with afp_cols[3]:
+            st.markdown(f"""<div class="definition-card"><b>Supuestos</b><br><span>retorno real {fmt_pct(afp['retorno_real_anual']*100)} · retiro {fmt_pct(afp['tasa_retiro_anual']*100)}</span></div>""", unsafe_allow_html=True)
+    if result.get("saving_range_rows"):
+        st.write("Tramos de ahorro aplicados")
+        sav_events = pd.DataFrame(result["saving_range_rows"])
+        sav_events["ahorro_min_clp"] = sav_events["ahorro_min_mm"].apply(fmt_clp_from_mm)
+        sav_events["ahorro_probable_clp"] = sav_events["ahorro_mode_mm"].apply(fmt_clp_from_mm)
+        sav_events["ahorro_max_clp"] = sav_events["ahorro_max_mm"].apply(fmt_clp_from_mm)
+        st.dataframe(
+            sav_events[["descripcion", "edad_inicio", "edad_fin", "ahorro_min_clp", "ahorro_probable_clp", "ahorro_max_clp", "mes_inicio", "mes_fin"]],
+            width="stretch",
+            hide_index=True,
+        )
     if result.get("recurring_event_rows"):
         st.write("Flujos recurrentes aplicados")
         rec_events = pd.DataFrame(result["recurring_event_rows"])
-        rec_events["monto_mensual_clp"] = rec_events["monto_mensual_mm"].apply(fmt_clp_from_mm)
-        st.dataframe(rec_events[["descripcion", "edad_inicio", "edad_fin", "monto_mensual_clp", "mes_inicio", "mes_fin"]], use_container_width=True)
+        rec_events["monto_base_clp"] = rec_events["monto_mensual_mm"].apply(fmt_clp_from_mm)
+        rec_events["monto_inicio_nominal_clp"] = rec_events["monto_inicio_nominal_mm"].apply(fmt_clp_from_mm)
+        rec_events["monto_fin_nominal_clp"] = rec_events["monto_fin_nominal_mm"].apply(fmt_clp_from_mm)
+        st.dataframe(
+            rec_events[["descripcion", "edad_inicio", "edad_fin", "monto_base_clp", "monto_inicio_nominal_clp", "monto_fin_nominal_clp", "indexado_inflacion", "mes_inicio", "mes_fin"]],
+            width="stretch",
+            hide_index=True,
+        )
 
 with tab3:
     n_sample = st.slider("Paths a mostrar", min_value=50, max_value=1_000, value=300, step=50)
-    st.plotly_chart(plot_sample_paths(result, n_sample=n_sample), use_container_width=True)
+    st.plotly_chart(plot_sample_paths(result, n_sample=n_sample), width="stretch")
 
 with tab4:
-    st.plotly_chart(plot_final_distribution(result), use_container_width=True)
+    st.plotly_chart(plot_final_distribution(result), width="stretch")
 
 with tab5:
-    st.plotly_chart(plot_ruin_distribution(result), use_container_width=True)
+    st.plotly_chart(plot_ruin_distribution(result), width="stretch")
     if result["prob_no_ruin"] == 1:
         st.success("En este escenario, ningún path agotó patrimonio dentro del horizonte simulado hasta los 90 años.")
     else:
@@ -1102,13 +1579,13 @@ with tab5:
 with tab6:
     st.write("Tabla por edad con montos en CLP")
     display_table = make_display_table(tabla)
-    st.dataframe(display_table, use_container_width=True)
+    st.dataframe(display_table, width="stretch")
 
     st.write("Resumen final con montos en CLP")
     summary_display = result["summary"].copy()
     for col in ["final_wealth_mm", "wealth_at_retirement_mm", "total_savings_mm"]:
         summary_display[col.replace("_mm", "_clp")] = summary_display[col].apply(fmt_clp_from_mm)
-    st.dataframe(summary_display[["metric", "final_wealth_clp", "wealth_at_retirement_clp", "total_savings_clp"]], use_container_width=True)
+    st.dataframe(summary_display[["metric", "final_wealth_clp", "wealth_at_retirement_clp", "total_savings_clp"]], width="stretch")
 
     csv_tabla = make_numeric_csv_table(tabla).to_csv(index=False).encode("utf-8")
     csv_summary = summary_display.to_csv(index=False).encode("utf-8")
@@ -1132,5 +1609,5 @@ with tab6:
 st.divider()
 st.caption(
     "Nota: esto es una herramienta de simulación, no una recomendación financiera. "
-    "El motor mantiene cálculos internos en MM CLP para estabilidad numérica, pero la interfaz muestra los montos en CLP con todos los ceros."
+    "El motor mantiene cálculos internos en MM CLP para estabilidad numérica, pero la interfaz muestra los montos en CLP con todos los ceros. Los flujos marcados como indexados se interpretan como pesos de hoy y crecen con inflación."
 )

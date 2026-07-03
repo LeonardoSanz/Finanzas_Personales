@@ -11,11 +11,7 @@ from scipy.stats import truncnorm
 # ============================================================
 
 def _truncnorm_mean(loc: float, scale: float, low: float, high: float) -> float:
-    """
-    Media efectiva de una normal truncada entre [low, high].
-    Se usa para calibrar el 'loc' si queremos que la media observada
-    luego del truncamiento sea igual a la media objetivo.
-    """
+    """Media efectiva de una normal truncada entre [low, high]."""
     if scale <= 0:
         raise ValueError("scale debe ser > 0")
     if low >= high:
@@ -45,10 +41,7 @@ def _find_loc_for_effective_truncated_mean(
     tol: float = 1e-10,
     max_iter: int = 200,
 ) -> float:
-    """
-    Encuentra el loc de la normal original para que la media efectiva
-    de la distribución truncada sea exactamente target_mean.
-    """
+    """Encuentra el loc pre-truncamiento para que la media truncada sea target_mean."""
     if not (low < target_mean < high):
         raise ValueError("La media objetivo debe estar entre low y high")
 
@@ -58,7 +51,6 @@ def _find_loc_for_effective_truncated_mean(
     for _ in range(max_iter):
         mid = 0.5 * (left + right)
         m = _truncnorm_mean(mid, scale, low, high)
-
         if abs(m - target_mean) < tol:
             return mid
         if m < target_mean:
@@ -69,20 +61,16 @@ def _find_loc_for_effective_truncated_mean(
     return 0.5 * (left + right)
 
 
-def _sample_truncated_normal(
-    rng: np.random.Generator,
+def _calibrate_truncated_normal(
     target_mean: float,
     std: float,
     low: float,
     high: float,
-    size: tuple[int, int],
     mean_is_effective: bool = True,
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[float, float, float, float]:
     """
-    Muestra una normal truncada y retorna:
-    - muestras
-    - loc usado antes del truncamiento
-    - media efectiva luego del truncamiento
+    Retorna loc, a, b, effective_mean para una normal truncada.
+    Se separa de la generación para poder simular mes a mes sin crear matrices gigantes.
     """
     if std <= 0:
         raise ValueError("La volatilidad debe ser > 0")
@@ -96,20 +84,30 @@ def _sample_truncated_normal(
         if mean_is_effective
         else target_mean
     )
-
     a = (low - loc) / std
     b = (high - loc) / std
-
-    draws = truncnorm.rvs(
-        a=a,
-        b=b,
-        loc=loc,
-        scale=std,
-        size=size,
-        random_state=rng,
-    )
-
     effective_mean = _truncnorm_mean(loc, std, low, high)
+    return loc, a, b, effective_mean
+
+
+def _sample_truncated_normal(
+    rng: np.random.Generator,
+    target_mean: float,
+    std: float,
+    low: float,
+    high: float,
+    size: tuple[int, int],
+    mean_is_effective: bool = True,
+) -> tuple[np.ndarray, float, float]:
+    """Muestra una normal truncada y retorna muestras, loc usado y media efectiva."""
+    loc, a, b, effective_mean = _calibrate_truncated_normal(
+        target_mean=target_mean,
+        std=std,
+        low=low,
+        high=high,
+        mean_is_effective=mean_is_effective,
+    )
+    draws = truncnorm.rvs(a=a, b=b, loc=loc, scale=std, size=size, random_state=rng)
     return draws, loc, effective_mean
 
 
@@ -138,7 +136,8 @@ def monte_carlo_accumulation_withdrawal_mm(
     seed: Optional[int] = 123,
     mean_is_effective: bool = True,
     lump_sum_events: Optional[tuple[tuple[int, float], ...]] = None,
-    recurring_monthly_events: Optional[tuple[tuple[float, Optional[float], float, str], ...]] = None,
+    recurring_monthly_events: Optional[tuple[tuple, ...]] = None,
+    saving_ranges: Optional[tuple[tuple[float, Optional[float], float, float, float, str], ...]] = None,
     floor_zero: bool = True,
     return_model: Literal["annual_smooth", "monthly_iid"] = "annual_smooth",
     withdrawal_indexed_to_inflation: bool = False,
@@ -148,14 +147,12 @@ def monte_carlo_accumulation_withdrawal_mm(
     Simula patrimonio en MM CLP con dos fases:
 
     1) Acumulación: ahorro mensual positivo hasta edad_inicio_retiro.
+       El ahorro puede ser un único triangular global o tramos por edad.
     2) Retiro: ahorro mensual = 0 y retiro fijo mensual desde edad_inicio_retiro.
 
-    La simulación trabaja en meses, pero los snapshots se muestran por edad/año.
-
-    recurring_monthly_events permite agregar ingresos o egresos mensuales recurrentes,
-    por ejemplo jubilación o arriendos desde cierta edad.
-    Formato: (edad_inicio, edad_fin_opcional, monto_mensual_mm, descripción).
-    Monto positivo = ingreso; monto negativo = egreso.
+    Esta versión evita guardar matrices gigantes de retornos/ahorros. Solo guarda paths,
+    flujos medios y vectores necesarios para reportes. Eso mejora la estabilidad en
+    Streamlit Cloud, especialmente en modo mensual IID y edad final 90.
     """
     if edad_final <= edad_inicial:
         raise ValueError("edad_final debe ser mayor que edad_inicial")
@@ -176,13 +173,13 @@ def monte_carlo_accumulation_withdrawal_mm(
 
     rng = np.random.default_rng(seed)
 
-    years = edad_final - edad_inicial
-    months = years * 12
+    years = int(edad_final - edad_inicial)
+    months = int(years * 12)
     retirement_start_month = int(round((edad_inicio_retiro - edad_inicial) * 12))
     retirement_start_month = min(max(retirement_start_month, 0), months)
 
     # -----------------------------
-    # Retornos
+    # Retornos: se calibran una vez, se generan mes a mes.
     # -----------------------------
     if return_model == "annual_smooth":
         annual_returns, loc_used, effective_mean = _sample_truncated_normal(
@@ -195,45 +192,30 @@ def monte_carlo_accumulation_withdrawal_mm(
             mean_is_effective=mean_is_effective,
         )
         monthly_returns_by_year = (1 + annual_returns) ** (1 / 12) - 1
-        monthly_returns = np.repeat(monthly_returns_by_year, repeats=12, axis=1)
+        monthly_loc_used = np.nan
+        monthly_effective_mean = np.nan
+        monthly_a = monthly_b = monthly_std = np.nan
     elif return_model == "monthly_iid":
-        # Aproximación: transforma parámetros anuales a mensuales.
-        # Esto captura mejor el sequence risk que suavizar el retorno anual.
         monthly_mean_target = (1 + annual_return_mean) ** (1 / 12) - 1
         monthly_std = annual_return_std / np.sqrt(12)
         monthly_low = (1 + annual_return_low) ** (1 / 12) - 1
         monthly_high = (1 + annual_return_high) ** (1 / 12) - 1
-
-        monthly_returns, loc_used, effective_monthly_mean = _sample_truncated_normal(
-            rng=rng,
+        monthly_loc_used, monthly_a, monthly_b, monthly_effective_mean = _calibrate_truncated_normal(
             target_mean=monthly_mean_target,
             std=monthly_std,
             low=monthly_low,
             high=monthly_high,
-            size=(n_paths, months),
             mean_is_effective=mean_is_effective,
         )
-        effective_mean = (1 + effective_monthly_mean) ** 12 - 1
+        loc_used = monthly_loc_used
+        effective_mean = (1 + monthly_effective_mean) ** 12 - 1
+        annual_returns = None
+        monthly_returns_by_year = None
     else:
         raise ValueError("return_model debe ser 'annual_smooth' o 'monthly_iid'")
 
     # -----------------------------
-    # Ahorros mensuales
-    # -----------------------------
-    monthly_savings = rng.triangular(
-        left=monthly_saving_min_mm,
-        mode=monthly_saving_mode_mm,
-        right=monthly_saving_max_mm,
-        size=(n_paths, months),
-    )
-
-    # Desde el inicio del retiro, ahorro = 0.
-    if retirement_start_month < months:
-        monthly_savings[:, retirement_start_month:] = 0.0
-
-    # -----------------------------
-    # Aportes extraordinarios
-    # lump_sum_events viene como tupla de (mes_simulacion_1_based, monto_mm)
+    # Aportes extraordinarios: monto positivo = entra plata; negativo = sale plata.
     # -----------------------------
     lump_sums = np.zeros(months, dtype=np.float64)
     if lump_sum_events is not None:
@@ -241,9 +223,154 @@ def monte_carlo_accumulation_withdrawal_mm(
             if amount_mm == 0:
                 continue
             if 1 <= month_idx <= months:
-                lump_sums[month_idx - 1] += amount_mm
+                lump_sums[month_idx - 1] += float(amount_mm)
             else:
                 raise ValueError(f"El mes {month_idx} está fuera del horizonte de simulación")
+
+    # -----------------------------
+    # Ingresos / egresos mensuales recurrentes externos
+    # Formato compatible:
+    #   Antiguo: (edad_inicio, edad_fin_opcional, monto_mensual_mm, descripción)
+    #   Nuevo:   (edad_inicio, edad_fin_opcional, monto_mensual_mm, descripción, indexado_inflacion, edad_base_indexacion)
+    #
+    # Si indexado_inflacion=True, el monto se interpreta en pesos de hoy / MM de hoy
+    # y se transforma a monto nominal de cada mes usando inflación anual.
+    # Esto permite que jubilación y arriendos crezcan igual que el retiro indexado.
+    # -----------------------------
+    recurring_cashflows = np.zeros(months, dtype=np.float64)
+    recurring_event_rows = []
+    monthly_inflation_for_cashflows = (1 + inflation_annual) ** (1 / 12) - 1 if inflation_annual > -1 else 0.0
+
+    if recurring_monthly_events is not None:
+        for item in recurring_monthly_events:
+            if len(item) == 4:
+                start_age, end_age, monthly_amount_mm, description = item
+                indexed_to_inflation = False
+                index_base_age = start_age
+            elif len(item) == 6:
+                start_age, end_age, monthly_amount_mm, description, indexed_to_inflation, index_base_age = item
+            else:
+                raise ValueError("Cada flujo recurrente debe tener 4 o 6 campos")
+
+            if monthly_amount_mm == 0:
+                continue
+            if start_age is None:
+                continue
+
+            start_month = int(round((float(start_age) - edad_inicial) * 12))
+            start_month = min(max(start_month, 0), months)
+
+            if end_age is None or (isinstance(end_age, float) and np.isnan(end_age)):
+                end_month = months
+                end_age_clean = edad_final
+            else:
+                end_month = int(round((float(end_age) - edad_inicial) * 12))
+                end_month = min(max(end_month, 0), months)
+                end_age_clean = float(end_age)
+
+            if end_month <= start_month:
+                continue
+
+            if index_base_age is None or (isinstance(index_base_age, float) and np.isnan(index_base_age)):
+                index_base_age = edad_inicial
+            base_month = int(round((float(index_base_age) - edad_inicial) * 12))
+
+            if indexed_to_inflation:
+                month_index = np.arange(start_month, end_month, dtype=np.float64)
+                k = month_index - float(base_month)
+                cashflow_vector = float(monthly_amount_mm) * (1 + monthly_inflation_for_cashflows) ** k
+            else:
+                cashflow_vector = np.full(end_month - start_month, float(monthly_amount_mm), dtype=np.float64)
+
+            recurring_cashflows[start_month:end_month] += cashflow_vector
+            recurring_event_rows.append(
+                {
+                    "descripcion": description,
+                    "edad_inicio": float(start_age),
+                    "edad_fin": end_age_clean,
+                    "monto_mensual_mm": float(monthly_amount_mm),
+                    "monto_inicio_nominal_mm": float(cashflow_vector[0]) if len(cashflow_vector) else 0.0,
+                    "monto_fin_nominal_mm": float(cashflow_vector[-1]) if len(cashflow_vector) else 0.0,
+                    "indexado_inflacion": bool(indexed_to_inflation),
+                    "edad_base_indexacion": float(index_base_age),
+                    "mes_inicio": int(start_month + 1),
+                    "mes_fin": int(end_month),
+                }
+            )
+
+    # -----------------------------
+    # Rangos de ahorro por edad
+    # Formato: (edad_inicio, edad_fin_opcional, ahorro_min_mm, ahorro_mode_mm, ahorro_max_mm, descripción)
+    # Si no se informa, se usa el triangular global. Desde edad_inicio_retiro el ahorro siempre queda en cero.
+    # -----------------------------
+    saving_min_schedule = np.zeros(months, dtype=np.float64)
+    saving_mode_schedule = np.zeros(months, dtype=np.float64)
+    saving_max_schedule = np.zeros(months, dtype=np.float64)
+    saving_range_rows = []
+
+    if saving_ranges is None or len(saving_ranges) == 0:
+        saving_min_schedule[:retirement_start_month] = float(monthly_saving_min_mm)
+        saving_mode_schedule[:retirement_start_month] = float(monthly_saving_mode_mm)
+        saving_max_schedule[:retirement_start_month] = float(monthly_saving_max_mm)
+        if retirement_start_month > 0:
+            saving_range_rows.append(
+                {
+                    "descripcion": "Ahorro global",
+                    "edad_inicio": float(edad_inicial),
+                    "edad_fin": float(edad_inicio_retiro),
+                    "ahorro_min_mm": float(monthly_saving_min_mm),
+                    "ahorro_mode_mm": float(monthly_saving_mode_mm),
+                    "ahorro_max_mm": float(monthly_saving_max_mm),
+                    "mes_inicio": 1,
+                    "mes_fin": int(retirement_start_month),
+                }
+            )
+    else:
+        for item in saving_ranges:
+            if len(item) == 6:
+                start_age, end_age, saving_min_mm, saving_mode_mm, saving_max_mm, description = item
+            elif len(item) == 5:
+                start_age, end_age, saving_min_mm, saving_mode_mm, saving_max_mm = item
+                description = "Tramo ahorro"
+            else:
+                raise ValueError("Cada rango de ahorro debe tener 5 o 6 campos")
+            if start_age is None:
+                continue
+            if not (saving_min_mm <= saving_mode_mm <= saving_max_mm):
+                raise ValueError(
+                    f"Rango de ahorro inválido en '{description}': debe cumplirse mínimo <= más probable <= máximo"
+                )
+            start_month = int(round((float(start_age) - edad_inicial) * 12))
+            start_month = min(max(start_month, 0), months)
+
+            if end_age is None or (isinstance(end_age, float) and np.isnan(end_age)):
+                end_month = retirement_start_month
+                end_age_clean = float(edad_inicio_retiro)
+            else:
+                end_month = int(round((float(end_age) - edad_inicial) * 12))
+                end_month = min(max(end_month, 0), months)
+                end_age_clean = float(end_age)
+
+            # El ahorro nunca cruza la edad de retiro: desde ahí queda en cero.
+            end_month = min(end_month, retirement_start_month)
+            if end_month <= start_month:
+                continue
+
+            saving_min_schedule[start_month:end_month] = float(saving_min_mm)
+            saving_mode_schedule[start_month:end_month] = float(saving_mode_mm)
+            saving_max_schedule[start_month:end_month] = float(saving_max_mm)
+            saving_range_rows.append(
+                {
+                    "descripcion": description,
+                    "edad_inicio": float(start_age),
+                    "edad_fin": min(end_age_clean, float(edad_inicio_retiro)),
+                    "ahorro_min_mm": float(saving_min_mm),
+                    "ahorro_mode_mm": float(saving_mode_mm),
+                    "ahorro_max_mm": float(saving_max_mm),
+                    "mes_inicio": int(start_month + 1),
+                    "mes_fin": int(end_month),
+                }
+            )
 
     # -----------------------------
     # Retiros mensuales fijos
@@ -252,71 +379,58 @@ def monte_carlo_accumulation_withdrawal_mm(
     if retirement_start_month < months and withdrawal_monthly_mm > 0:
         if withdrawal_indexed_to_inflation:
             monthly_inflation = (1 + inflation_annual) ** (1 / 12) - 1
-            for t in range(retirement_start_month, months):
-                k = t - retirement_start_month
-                withdrawal_schedule[t] = withdrawal_monthly_mm * (1 + monthly_inflation) ** k
+            k = np.arange(months - retirement_start_month)
+            withdrawal_schedule[retirement_start_month:] = withdrawal_monthly_mm * (1 + monthly_inflation) ** k
         else:
             withdrawal_schedule[retirement_start_month:] = withdrawal_monthly_mm
 
     # -----------------------------
-    # Ingresos / egresos mensuales recurrentes externos
-    # Ejemplos: jubilación, arriendo de propiedades, pensión, costos recurrentes.
-    # Se aplica al final del mes para mantener la lectura simple.
+    # Simulación path by path en matriz de patrimonio, pero flujos/retornos se generan por mes.
+    # paths en float32 reduce memoria y es suficiente para MM CLP.
     # -----------------------------
-    recurring_cashflows = np.zeros(months, dtype=np.float64)
-    recurring_event_rows = []
-    if recurring_monthly_events is not None:
-        for start_age, end_age, monthly_amount_mm, description in recurring_monthly_events:
-            if monthly_amount_mm == 0:
-                continue
-            if start_age < edad_inicial:
-                start_month = 0
-            else:
-                start_month = int(round((float(start_age) - edad_inicial) * 12))
-            if end_age is None or (isinstance(end_age, float) and np.isnan(end_age)):
-                end_month = months
-                end_age_clean = edad_final
-            else:
-                end_month = int(round((float(end_age) - edad_inicial) * 12))
-                end_age_clean = float(end_age)
-
-            start_month = min(max(start_month, 0), months)
-            end_month = min(max(end_month, 0), months)
-            if end_month <= start_month:
-                continue
-
-            recurring_cashflows[start_month:end_month] += float(monthly_amount_mm)
-            recurring_event_rows.append(
-                {
-                    "edad_inicio": float(start_age),
-                    "edad_fin": end_age_clean,
-                    "monto_mensual_mm": float(monthly_amount_mm),
-                    "descripcion": str(description),
-                    "mes_inicio": start_month + 1,
-                    "mes_fin": end_month,
-                }
-            )
-
-    # -----------------------------
-    # Paths
-    # -----------------------------
-    paths = np.empty((n_paths, months + 1), dtype=np.float64)
-    paths[:, 0] = initial_capital_mm
-
-    ruin_month = np.full(n_paths, np.nan, dtype=np.float64)
+    paths = np.empty((n_paths, months + 1), dtype=np.float32)
+    paths[:, 0] = np.float32(initial_capital_mm)
+    ruin_month = np.full(n_paths, np.nan, dtype=np.float32)
+    total_savings = np.zeros(n_paths, dtype=np.float32)
+    monthly_savings_mean = np.zeros(months, dtype=np.float64)
+    monthly_return_mean = np.zeros(months, dtype=np.float64)
 
     for t in range(months):
-        r_t = monthly_returns[:, t]
-        savings_t = monthly_savings[:, t]
-        lump_t = lump_sums[t]
-        recurring_t = recurring_cashflows[t]
-        withdrawal_t = withdrawal_schedule[t]
+        if return_model == "annual_smooth":
+            year_idx = min(t // 12, years - 1)
+            r_t = monthly_returns_by_year[:, year_idx].astype(np.float32, copy=False)
+        else:
+            r_t = truncnorm.rvs(
+                a=monthly_a,
+                b=monthly_b,
+                loc=monthly_loc_used,
+                scale=monthly_std,
+                size=n_paths,
+                random_state=rng,
+            ).astype(np.float32, copy=False)
+        monthly_return_mean[t] = float(np.mean(r_t))
 
-        wealth = paths[:, t].copy()
+        if t < retirement_start_month and saving_max_schedule[t] > 0:
+            savings_t = rng.triangular(
+                left=saving_min_schedule[t],
+                mode=saving_mode_schedule[t],
+                right=saving_max_schedule[t],
+                size=n_paths,
+            ).astype(np.float32, copy=False)
+        else:
+            savings_t = np.zeros(n_paths, dtype=np.float32)
+
+        monthly_savings_mean[t] = float(np.mean(savings_t))
+        total_savings += savings_t
+
+        lump_t = np.float32(lump_sums[t])
+        recurring_t = np.float32(recurring_cashflows[t])
+        withdrawal_t = np.float32(withdrawal_schedule[t])
+
+        wealth = paths[:, t].astype(np.float32, copy=True)
 
         if contribution_timing == "begin":
             wealth = wealth + savings_t + lump_t
-
         if withdrawal_timing == "begin":
             wealth = wealth - withdrawal_t
 
@@ -324,12 +438,11 @@ def monte_carlo_accumulation_withdrawal_mm(
 
         if contribution_timing == "end":
             wealth = wealth + savings_t + lump_t
-
-        # Flujos externos recurrentes se reciben/pagan al final del mes.
-        wealth = wealth + recurring_t
-
         if withdrawal_timing == "end":
             wealth = wealth - withdrawal_t
+
+        # Ingresos/egresos recurrentes externos se aplican al final del mes.
+        wealth = wealth + recurring_t
 
         newly_ruined = (
             np.isnan(ruin_month)
@@ -337,21 +450,22 @@ def monte_carlo_accumulation_withdrawal_mm(
             & (withdrawal_t > 0)
             & (wealth <= 0)
         )
-        ruin_month[newly_ruined] = t + 1
+        ruin_month[newly_ruined] = np.float32(t + 1)
 
         if floor_zero:
             wealth = np.maximum(wealth, 0.0)
 
-        paths[:, t + 1] = wealth
+        paths[:, t + 1] = wealth.astype(np.float32, copy=False)
 
-    final_wealth = paths[:, -1]
-    wealth_at_retirement = paths[:, retirement_start_month]
-    total_savings = monthly_savings.sum(axis=1)
-    total_lump_sums = lump_sums.sum()
-    total_withdrawal_requested = withdrawal_schedule.sum()
-    total_recurring_inflows = recurring_cashflows[recurring_cashflows > 0].sum()
-    total_recurring_outflows = -recurring_cashflows[recurring_cashflows < 0].sum()
-    total_recurring_net = recurring_cashflows.sum()
+    final_wealth = paths[:, -1].astype(np.float64)
+    wealth_at_retirement = paths[:, retirement_start_month].astype(np.float64)
+    total_savings = total_savings.astype(np.float64)
+
+    total_lump_sums = float(lump_sums.sum())
+    total_withdrawal_requested = float(withdrawal_schedule.sum())
+    total_recurring_inflows = float(recurring_cashflows[recurring_cashflows > 0].sum())
+    total_recurring_outflows = float(-recurring_cashflows[recurring_cashflows < 0].sum())
+    total_recurring_net = float(recurring_cashflows.sum())
 
     def pct(x: np.ndarray, q: float) -> float:
         return float(np.percentile(x, q))
@@ -396,7 +510,7 @@ def monte_carlo_accumulation_withdrawal_mm(
         prob_reach_target_at_retirement = float(np.mean(wealth_at_retirement >= target_mm))
 
     prob_no_ruin = float(np.mean(np.isnan(ruin_month)))
-    ruin_age = edad_inicial + ruin_month / 12
+    ruin_age = edad_inicial + ruin_month.astype(np.float64) / 12
     ruin_age_clean = ruin_age[~np.isnan(ruin_age)]
     median_ruin_age = float(np.median(ruin_age_clean)) if len(ruin_age_clean) > 0 else np.nan
 
@@ -404,6 +518,9 @@ def monte_carlo_accumulation_withdrawal_mm(
         prob_final_above_retirement_wealth = float(np.mean(final_wealth > wealth_at_retirement))
     else:
         prob_final_above_retirement_wealth = np.nan
+
+    # Solo informativo: cantidad aproximada de memoria del path principal.
+    path_memory_mb = float(paths.nbytes / (1024 ** 2))
 
     return {
         "inputs": {
@@ -432,21 +549,31 @@ def monte_carlo_accumulation_withdrawal_mm(
             "effective_truncated_mean_annualized": effective_mean,
             "lump_sum_events": lump_sum_events,
             "recurring_monthly_events": recurring_monthly_events,
+            "saving_ranges": saving_ranges,
             "floor_zero": floor_zero,
             "return_model": return_model,
             "withdrawal_indexed_to_inflation": withdrawal_indexed_to_inflation,
             "inflation_annual": inflation_annual,
+            "path_memory_mb": path_memory_mb,
         },
         "summary": final_summary,
         "paths_mm": paths,
         "final_wealth_mm": final_wealth,
         "wealth_at_retirement_mm": wealth_at_retirement,
         "total_savings_mm": total_savings,
-        "monthly_savings_mm": monthly_savings,
-        "monthly_returns": monthly_returns,
+        # Nueva forma liviana: vector promedio mensual, no matriz n_paths x months.
+        "monthly_savings_mean_mm": monthly_savings_mean,
+        "monthly_returns_mean": monthly_return_mean,
+        # Compatibilidad: ya no guardamos la matriz gigante.
+        "monthly_savings_mm": None,
+        "monthly_returns": None,
         "lump_sums_mm": lump_sums,
         "recurring_cashflows_mm": recurring_cashflows,
         "recurring_event_rows": recurring_event_rows,
+        "saving_min_schedule_mm": saving_min_schedule,
+        "saving_mode_schedule_mm": saving_mode_schedule,
+        "saving_max_schedule_mm": saving_max_schedule,
+        "saving_range_rows": saving_range_rows,
         "withdrawal_schedule_mm": withdrawal_schedule,
         "ruin_month": ruin_month,
         "ruin_age": ruin_age,
@@ -465,40 +592,45 @@ def monte_carlo_accumulation_withdrawal_mm(
 
 
 def tabla_monte_carlo_por_edad(result: dict) -> pd.DataFrame:
-    """
-    Tabla anual con percentiles, probabilidad sobre target y flujo anual promedio.
-    """
+    """Tabla anual con percentiles, probabilidad sobre target y flujo anual promedio."""
     paths = result["paths_mm"]
     inputs = result["inputs"]
     edad_inicial = inputs["edad_inicial"]
     years = inputs["years"]
     target_mm = inputs["target_mm"]
-    monthly_savings = result["monthly_savings_mm"]
+    monthly_savings_mean = result.get("monthly_savings_mean_mm")
     withdrawal_schedule = result["withdrawal_schedule_mm"]
     lump_sums = result["lump_sums_mm"]
     recurring_cashflows = result.get("recurring_cashflows_mm", np.zeros_like(lump_sums))
 
+    if monthly_savings_mean is None:
+        old_monthly_savings = result.get("monthly_savings_mm")
+        if old_monthly_savings is None:
+            monthly_savings_mean = np.zeros_like(lump_sums)
+        else:
+            monthly_savings_mean = old_monthly_savings.mean(axis=0)
+
     rows = []
     for year in range(0, years + 1):
         month = year * 12
-        data = paths[:, month]
+        data = paths[:, month].astype(np.float64)
 
         if year < years:
             m0 = year * 12
             m1 = (year + 1) * 12
-            ahorro_prom_mensual = float(np.mean(monthly_savings[:, m0:m1]))
+            ahorro_prom_mensual = float(np.mean(monthly_savings_mean[m0:m1]))
             retiro_prom_mensual = float(np.mean(withdrawal_schedule[m0:m1]))
+            aporte_extra_anual = float(np.sum(lump_sums[m0:m1]))
             flujo_recurrente_prom_mensual = float(np.mean(recurring_cashflows[m0:m1]))
             ingreso_recurrente_prom_mensual = float(np.mean(np.maximum(recurring_cashflows[m0:m1], 0)))
             egreso_recurrente_prom_mensual = float(np.mean(np.maximum(-recurring_cashflows[m0:m1], 0)))
-            aporte_extra_anual = float(np.sum(lump_sums[m0:m1]))
         else:
             ahorro_prom_mensual = 0.0
             retiro_prom_mensual = 0.0
+            aporte_extra_anual = 0.0
             flujo_recurrente_prom_mensual = 0.0
             ingreso_recurrente_prom_mensual = 0.0
             egreso_recurrente_prom_mensual = 0.0
-            aporte_extra_anual = 0.0
 
         prob_sobre_target = np.nan if target_mm is None else float(np.mean(data >= target_mm))
         prob_sobre_cero = float(np.mean(data > 0))
@@ -507,12 +639,12 @@ def tabla_monte_carlo_por_edad(result: dict) -> pd.DataFrame:
             {
                 "edad": edad_inicial + year,
                 "año_simulación": year,
-                "media_mm": np.mean(data),
-                "p5_mm": np.percentile(data, 5),
-                "p25_mm": np.percentile(data, 25),
-                "p50_mediana_mm": np.percentile(data, 50),
-                "p75_mm": np.percentile(data, 75),
-                "p95_mm": np.percentile(data, 95),
+                "media_mm": float(np.mean(data)),
+                "p5_mm": float(np.percentile(data, 5)),
+                "p25_mm": float(np.percentile(data, 25)),
+                "p50_mediana_mm": float(np.percentile(data, 50)),
+                "p75_mm": float(np.percentile(data, 75)),
+                "p95_mm": float(np.percentile(data, 95)),
                 "prob_sobre_target": prob_sobre_target,
                 "prob_sobre_cero": prob_sobre_cero,
                 "ahorro_prom_mensual_mm": ahorro_prom_mensual,
@@ -543,5 +675,3 @@ def tabla_monte_carlo_por_edad(result: dict) -> pd.DataFrame:
     tabla["prob_sobre_target"] = (tabla["prob_sobre_target"] * 100).round(2)
     tabla["prob_sobre_cero"] = (tabla["prob_sobre_cero"] * 100).round(2)
     return tabla
-
-
