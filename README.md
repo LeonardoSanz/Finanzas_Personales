@@ -153,3 +153,23 @@ Los flujos esporádicos son eventos únicos. Un ingreso positivo aumenta el patr
 
 - Corregido `Edad inicio retiro`: cuando la edad inicial sube sobre 40, el valor por defecto ahora se ajusta automáticamente a la edad inicial. Antes podía quedar `value=40` con `min_value>40`, lo que hacía caer Streamlit al cambiar parámetros.
 - Se agregó un clamp extra al selector de distribución por edad para evitar índices fuera de rango si se cambia el horizonte/edad y queda estado anterior en sesión.
+
+## Mejora estética y defaults personales
+
+- Inputs reordenados en pestañas: Base, Ahorro por edad, AFP, Ingresos/gastos, Eventos únicos y Mercado.
+- Se cargan por defecto los supuestos usados como punto de partida:
+  - edad inicial 27,
+  - retiro desde 42,
+  - edad final 90,
+  - capital inicial $35.000.000,
+  - retiro mensual $5.000.000 indexado,
+  - inflación 3%,
+  - AFP actual $40.000.000,
+  - ahorro mensual AFP $600.000,
+  - jubilación AFP a los 60,
+  - retorno real AFP 5%,
+  - tasa retiro AFP 3,2%,
+  - arriendo desde los 52 por $1.200.000 indexado,
+  - evento único a los 31 por $40.000.000.
+- Eliminadas las equivalencias visuales bajo cada input monetario para reducir ruido visual.
+- Simplificado el hero superior y agregada una nota compacta del escenario base.

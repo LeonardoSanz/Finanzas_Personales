@@ -124,7 +124,7 @@ def parse_clp_value(value, default: int = 0) -> int:
         return int(default)
 
 
-def money_text_input(label: str, value: int, *, key: str, help: str | None = None) -> int:
+def money_text_input(label: str, value: int, *, key: str, help: str | None = None, show_caption: bool = False) -> int:
     """Input de dinero con separadores visibles. Streamlit number_input no agrupa miles de forma consistente."""
     text = st.text_input(
         label,
@@ -134,7 +134,8 @@ def money_text_input(label: str, value: int, *, key: str, help: str | None = Non
         placeholder="ej: 1.000.000.000",
     )
     parsed = max(parse_clp_value(text, default=value), 0)
-    st.caption(f"= {fmt_clp(parsed)} · {fmt_mm_from_clp(parsed)}")
+    if show_caption:
+        st.caption(f"= {fmt_clp(parsed)} · {fmt_mm_from_clp(parsed)}")
     return parsed
 
 
@@ -255,6 +256,38 @@ def inject_css() -> None:
             font-size: 0.82rem;
             font-weight: 700;
         }}
+
+        .workflow-note {
+            border: 1px solid rgba(0, 209, 255, 0.22);
+            background: linear-gradient(90deg, rgba(0, 209, 255, 0.10), rgba(139, 61, 255, 0.08));
+            color: var(--muted);
+            border-radius: 18px;
+            padding: 12px 16px;
+            margin: 2px 0 16px 0;
+            font-size: 0.92rem;
+        }
+
+        .workflow-note b { color: var(--text); }
+
+        .mini-card {
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(11, 31, 74, 0.62);
+            border-radius: 16px;
+            padding: 12px 14px;
+            min-height: 72px;
+        }
+
+        .mini-card b {
+            color: var(--text);
+            display: block;
+            font-size: 0.86rem;
+            margin-bottom: 5px;
+        }
+
+        .mini-card span {
+            color: var(--muted);
+            font-size: 0.90rem;
+        }
 
         .input-panel {{
             border: 1px solid rgba(139, 61, 255, 0.26);
@@ -920,13 +953,10 @@ st.markdown(
             qué ingresos recurrentes entran después y si el patrimonio llega vivo a los {EDAD_FINAL_FIJA} años.
         </div>
         <div class="quant-pill-row">
-            <div class="quant-pill">Montos con separador de miles: $1.000.000.000</div>
+            <div class="quant-pill">Escenario base editable</div>
             <div class="quant-pill">Edad final fija: {EDAD_FINAL_FIJA}</div>
-            <div class="quant-pill">Ahorro por tramos de edad</div>
-            <div class="quant-pill">Jubilación AFP calculada</div>
-            <div class="quant-pill">Arriendos indexados a inflación</div>
-            <div class="quant-pill">Flujos esporádicos</div>
-            <div class="quant-pill">Percentiles Monte Carlo</div>
+            <div class="quant-pill">Ahorro por edad</div>
+            <div class="quant-pill">AFP + arriendos indexados</div>
         </div>
     </div>
     """,
@@ -938,234 +968,263 @@ st.markdown(
 # ============================================================
 
 with st.form("formulario_simulacion"):
-    panel_start("1. Supuestos base", "Edad final fija en 90 años. Todos los montos se ingresan en CLP con separadores: 1.000.000.000.")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        edad_inicial = st.number_input("Edad inicial", min_value=18, max_value=89, value=28, step=1)
-    with c2:
-        edad_final = EDAD_FINAL_FIJA
-        st.number_input("Edad final", min_value=EDAD_FINAL_FIJA, max_value=EDAD_FINAL_FIJA, value=EDAD_FINAL_FIJA, step=1, disabled=True)
-    with c3:
-        default_edad_inicio_retiro = min(max(40, int(edad_inicial)), EDAD_FINAL_FIJA)
-        edad_inicio_retiro = st.number_input(
-            "Edad inicio retiro",
-            min_value=int(edad_inicial),
-            max_value=EDAD_FINAL_FIJA,
-            value=default_edad_inicio_retiro,
-            step=1,
-            help="Desde esta edad el ahorro mensual se vuelve cero y comienza el retiro fijo mensual.",
+    st.markdown(
+        """
+        <div class="workflow-note">
+            <b>Escenario base guardado para partir:</b> edad 27 → retiro 42 → final 90, capital $35.000.000,
+            retiro $5.000.000 mensual indexado, AFP desde 60 y arriendo desde 52. Ajusta solo lo que quieras probar.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    input_tabs = st.tabs([
+        "1. Base",
+        "2. Ahorro por edad",
+        "3. AFP",
+        "4. Ingresos / gastos",
+        "5. Eventos únicos",
+        "6. Mercado",
+    ])
+
+    with input_tabs[0]:
+        panel_start(
+            "Supuestos base",
+            "Aquí queda lo mínimo para definir el ciclo de vida: edad inicial, edad de retiro, patrimonio inicial, meta y retiro mensual. La edad final queda fija en 90 años.",
         )
-    with c4:
-        target_clp = money_text_input(
-            "Meta patrimonial CLP",
-            1_000_000_000,
-            key="target_clp_text",
-            help="Puedes escribir 1.000.000.000 o 1.000 MM.",
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            edad_inicial = st.number_input("Edad inicial", min_value=18, max_value=89, value=27, step=1)
+        with c2:
+            edad_final = EDAD_FINAL_FIJA
+            st.number_input("Edad final", min_value=EDAD_FINAL_FIJA, max_value=EDAD_FINAL_FIJA, value=EDAD_FINAL_FIJA, step=1, disabled=True)
+        with c3:
+            default_edad_inicio_retiro = min(max(42, int(edad_inicial)), EDAD_FINAL_FIJA)
+            edad_inicio_retiro = st.number_input(
+                "Edad inicio retiro",
+                min_value=int(edad_inicial),
+                max_value=EDAD_FINAL_FIJA,
+                value=default_edad_inicio_retiro,
+                step=1,
+                help="Desde esta edad el ahorro mensual se vuelve cero y comienza el retiro fijo mensual.",
+            )
+        with c4:
+            target_clp = money_text_input(
+                "Meta patrimonial CLP",
+                1_000_000_000,
+                key="target_clp_text",
+                help="Puedes escribir 1.000.000.000 o 1.000 MM.",
+            )
+
+        c5, c6, c7, c8 = st.columns(4)
+        with c5:
+            initial_capital_clp = money_text_input("Capital inicial CLP", 35_000_000, key="initial_capital_clp_text")
+        with c6:
+            withdrawal_monthly_clp = money_text_input("Retiro mensual fijo CLP", 5_000_000, key="withdrawal_monthly_clp_text")
+        with c7:
+            withdrawal_indexed_to_inflation = st.checkbox("Indexar retiro por inflación", value=True)
+        with c8:
+            inflation_annual_pct = st.number_input("Inflación anual indexación (%)", min_value=0.0, value=3.0, step=0.25)
+        panel_end()
+
+    with input_tabs[1]:
+        panel_start(
+            "Rangos de ahorro mensual por edad",
+            "Cada tramo usa distribución triangular: mínimo, más probable y máximo. Desde la edad de retiro el ahorro patrimonial queda automáticamente en cero.",
         )
+        t1, t2 = st.columns([3, 1])
+        with t1:
+            st.caption("Default: etapa actual fuerte, menor ahorro entre 30 y 40 por hijos/familia, y recuperación hasta la edad de retiro.")
+        with t2:
+            contribution_timing_es = st.selectbox("Timing ahorro", ["Fin de mes", "Inicio de mes"], index=0)
 
-    c5, c6, c7, c8 = st.columns(4)
-    with c5:
-        initial_capital_clp = money_text_input("Capital inicial CLP", 50_000_000, key="initial_capital_clp_text")
-    with c6:
-        withdrawal_monthly_clp = money_text_input("Retiro mensual fijo CLP", 3_000_000, key="withdrawal_monthly_clp_text")
-    with c7:
-        withdrawal_indexed_to_inflation = st.checkbox("Indexar retiro por inflación", value=False)
-    with c8:
-        inflation_annual_pct = st.number_input("Inflación anual indexación (%)", min_value=0.0, value=3.0, step=0.25)
-    panel_end()
-
-    panel_start("2. Rangos de ahorro mensual por edad", "Cada tramo usa una distribución triangular: mínimo, más probable y máximo. Desde la edad de retiro el ahorro queda automáticamente en cero.")
-    t1, t2 = st.columns([3, 1])
-    with t1:
-        st.caption("Ejemplo: de ahora a 30 puedes ahorrar X, de 30 a 40 otro monto por hijos, y luego otro tramo hasta el retiro.")
-    with t2:
-        contribution_timing_es = st.selectbox("Timing ahorro", ["Fin de mes", "Inicio de mes"], index=0)
-
-    default_saving_rows = []
-    if int(edad_inicio_retiro) > int(edad_inicial):
-        # Tramo 1: desde hoy hasta 30, si aplica.
-        if int(edad_inicial) < 30:
+        default_saving_rows = []
+        if int(edad_inicio_retiro) > int(edad_inicial):
+            if int(edad_inicial) < 30:
+                default_saving_rows.append(
+                    {
+                        "descripcion": "Etapa actual",
+                        "edad_inicio": int(edad_inicial),
+                        "edad_fin": min(30, int(edad_inicio_retiro)),
+                        "ahorro_min_clp": "2.500.000",
+                        "ahorro_probable_clp": "3.000.000",
+                        "ahorro_max_clp": "3.500.000",
+                    }
+                )
+            if int(edad_inicio_retiro) > max(30, int(edad_inicial)):
+                default_saving_rows.append(
+                    {
+                        "descripcion": "Hijos / menor ahorro",
+                        "edad_inicio": max(30, int(edad_inicial)),
+                        "edad_fin": min(40, int(edad_inicio_retiro)),
+                        "ahorro_min_clp": "1.000.000",
+                        "ahorro_probable_clp": "1.500.000",
+                        "ahorro_max_clp": "2.000.000",
+                    }
+                )
+            if int(edad_inicio_retiro) > max(40, int(edad_inicial)):
+                default_saving_rows.append(
+                    {
+                        "descripcion": "Recuperación ahorro",
+                        "edad_inicio": max(40, int(edad_inicial)),
+                        "edad_fin": int(edad_inicio_retiro),
+                        "ahorro_min_clp": "2.000.000",
+                        "ahorro_probable_clp": "2.500.000",
+                        "ahorro_max_clp": "3.000.000",
+                    }
+                )
+        if not default_saving_rows:
             default_saving_rows.append(
                 {
-                    "descripcion": "Etapa actual",
+                    "descripcion": "Sin ahorro previo al retiro",
                     "edad_inicio": int(edad_inicial),
-                    "edad_fin": min(30, int(edad_inicio_retiro)),
-                    "ahorro_min_clp": "2.500.000",
-                    "ahorro_probable_clp": "3.000.000",
-                    "ahorro_max_clp": "3.500.000",
+                    "edad_fin": min(int(edad_inicial) + 1, EDAD_FINAL_FIJA),
+                    "ahorro_min_clp": "0",
+                    "ahorro_probable_clp": "0",
+                    "ahorro_max_clp": "0",
                 }
             )
-        # Tramo 2: 30 a 40, pensado para hijos / menor ahorro.
-        if int(edad_inicio_retiro) > max(30, int(edad_inicial)):
-            default_saving_rows.append(
-                {
-                    "descripcion": "Hijos / menor ahorro",
-                    "edad_inicio": max(30, int(edad_inicial)),
-                    "edad_fin": min(40, int(edad_inicio_retiro)),
-                    "ahorro_min_clp": "1.000.000",
-                    "ahorro_probable_clp": "1.500.000",
-                    "ahorro_max_clp": "2.000.000",
-                }
-            )
-        # Tramo 3: desde 40 hasta retiro, si aplica.
-        if int(edad_inicio_retiro) > max(40, int(edad_inicial)):
-            default_saving_rows.append(
-                {
-                    "descripcion": "Recuperación ahorro",
-                    "edad_inicio": max(40, int(edad_inicial)),
-                    "edad_fin": int(edad_inicio_retiro),
-                    "ahorro_min_clp": "2.000.000",
-                    "ahorro_probable_clp": "2.500.000",
-                    "ahorro_max_clp": "3.000.000",
-                }
-            )
-    if not default_saving_rows:
-        default_saving_rows.append(
+        default_saving_df = pd.DataFrame(default_saving_rows)
+        saving_ranges_df = st.data_editor(
+            default_saving_df,
+            num_rows="dynamic",
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "descripcion": st.column_config.TextColumn("Descripción"),
+                "edad_inicio": st.column_config.NumberColumn("Edad inicio", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
+                "edad_fin": st.column_config.NumberColumn("Edad fin", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
+                "ahorro_min_clp": st.column_config.TextColumn("Ahorro mínimo CLP", help="Ej: 1.000.000 o 1 MM"),
+                "ahorro_probable_clp": st.column_config.TextColumn("Ahorro más probable CLP", help="Ej: 1.500.000 o 1,5 MM"),
+                "ahorro_max_clp": st.column_config.TextColumn("Ahorro máximo CLP", help="Ej: 2.000.000 o 2 MM"),
+            },
+            key="saving_ranges_editor",
+        )
+        panel_end()
+
+    with input_tabs[2]:
+        panel_start(
+            "Jubilación AFP estimada",
+            "Calcula una pensión real aproximada: saldo AFP + ahorro mensual AFP a retorno real, y luego retiro anual como % del saldo al jubilar. La pensión se indexa por inflación.",
+        )
+        afp_enable = st.checkbox("Agregar jubilación AFP calculada como ingreso recurrente", value=True)
+        afp1, afp2, afp3, afp4, afp5 = st.columns(5)
+        with afp1:
+            afp_balance_clp = money_text_input("Saldo AFP actual CLP", 40_000_000, key="afp_balance_clp_text")
+        with afp2:
+            afp_monthly_contribution_clp = money_text_input("Ahorro mensual AFP CLP", 600_000, key="afp_monthly_contribution_clp_text")
+        with afp3:
+            afp_retirement_age = st.number_input("Edad jubilación AFP", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, value=min(max(60, int(edad_inicial)), EDAD_FINAL_FIJA), step=1)
+        with afp4:
+            afp_real_return_pct = st.number_input("Retorno real AFP anual (%)", min_value=-5.0, max_value=15.0, value=5.0, step=0.25)
+        with afp5:
+            afp_withdrawal_rate_pct = st.number_input("Tasa retiro AFP anual (%)", min_value=0.0, max_value=10.0, value=3.2, step=0.1)
+
+        months_to_afp = max(int(round((float(afp_retirement_age) - float(edad_inicial)) * 12)), 0)
+        afp_fv_real_clp = future_value_monthly_real_clp(
+            initial_balance_clp=afp_balance_clp,
+            monthly_contribution_clp=afp_monthly_contribution_clp,
+            annual_real_return=float(afp_real_return_pct) / 100,
+            n_months=months_to_afp,
+            contribution_timing="end",
+        )
+        afp_monthly_pension_real_clp = afp_fv_real_clp * (float(afp_withdrawal_rate_pct) / 100) / 12
+        afp_monthly_inflation = (1 + float(inflation_annual_pct) / 100) ** (1 / 12) - 1 if float(inflation_annual_pct) > -100 else 0.0
+        afp_monthly_pension_nominal_start_clp = afp_monthly_pension_real_clp * (1 + afp_monthly_inflation) ** months_to_afp
+
+        afp_summary = st.columns(3)
+        with afp_summary[0]:
+            st.markdown(f"""<div class="mini-card"><b>Saldo AFP al jubilar</b><span>{fmt_clp(afp_fv_real_clp)} de hoy</span></div>""", unsafe_allow_html=True)
+        with afp_summary[1]:
+            st.markdown(f"""<div class="mini-card"><b>Pensión real mensual</b><span>{fmt_clp(afp_monthly_pension_real_clp)} de hoy</span></div>""", unsafe_allow_html=True)
+        with afp_summary[2]:
+            st.markdown(f"""<div class="mini-card"><b>Pensión nominal inicial</b><span>{fmt_clp(afp_monthly_pension_nominal_start_clp)} a los {int(afp_retirement_age)}</span></div>""", unsafe_allow_html=True)
+        st.caption("Si el ahorro AFP ya está dentro de tus tramos de ahorro patrimonial, evita duplicarlo.")
+        panel_end()
+
+    with input_tabs[3]:
+        panel_start(
+            "Otros ingresos o egresos mensuales recurrentes",
+            "Arriendos, dividendos, gastos familiares u otros flujos mensuales. Si marcas indexación, el monto escrito en pesos de hoy crece con inflación.",
+        )
+        default_recurring_df = pd.DataFrame(
             {
-                "descripcion": "Sin ahorro previo al retiro",
-                "edad_inicio": int(edad_inicial),
-                "edad_fin": min(int(edad_inicial) + 1, EDAD_FINAL_FIJA),
-                "ahorro_min_clp": "0",
-                "ahorro_probable_clp": "0",
-                "ahorro_max_clp": "0",
+                "descripcion": ["Arriendo propiedades", "Otro ingreso", "Gasto familiar"],
+                "tipo": ["Ingreso", "Ingreso", "Egreso"],
+                "edad_inicio": [max(52, int(edad_inicial)), max(65, int(edad_inicial)), max(30, int(edad_inicial))],
+                "edad_fin": [90, 90, 90],
+                "monto_mensual_clp": ["1.200.000", "0", "0"],
+                "indexar_inflacion": [True, False, True],
             }
         )
-    default_saving_df = pd.DataFrame(default_saving_rows)
-    saving_ranges_df = st.data_editor(
-        default_saving_df,
-        num_rows="dynamic",
-        width="stretch",
-        column_config={
-            "descripcion": st.column_config.TextColumn("Descripción"),
-            "edad_inicio": st.column_config.NumberColumn("Edad inicio", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
-            "edad_fin": st.column_config.NumberColumn("Edad fin", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
-            "ahorro_min_clp": st.column_config.TextColumn("Ahorro mínimo CLP", help="Ej: 1.000.000 o 1 MM"),
-            "ahorro_probable_clp": st.column_config.TextColumn("Ahorro más probable CLP", help="Ej: 1.500.000 o 1,5 MM"),
-            "ahorro_max_clp": st.column_config.TextColumn("Ahorro máximo CLP", help="Ej: 2.000.000 o 2 MM"),
-        },
-        key="saving_ranges_editor",
-    )
-    # Se eliminó la vista duplicada con separadores bajo el editor.
-    # El editor acepta montos escritos como 1.000.000, $1.000.000 o 1 MM,
-    # y el parsing se mantiene en la preparación de inputs antes de simular.
-    panel_end()
+        recurring_df = st.data_editor(
+            default_recurring_df,
+            num_rows="dynamic",
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "descripcion": st.column_config.TextColumn("Descripción"),
+                "tipo": st.column_config.SelectboxColumn("Tipo", options=["Ingreso", "Egreso"], required=True),
+                "edad_inicio": st.column_config.NumberColumn("Edad inicio", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
+                "edad_fin": st.column_config.NumberColumn("Edad fin", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
+                "monto_mensual_clp": st.column_config.TextColumn("Monto mensual CLP", help="Ej: 1.200.000 o 1,2 MM. Si marcas indexación, se interpreta como pesos de hoy."),
+                "indexar_inflacion": st.column_config.CheckboxColumn("Indexar inflación", help="Si está marcado, el monto crece con inflación desde hoy."),
+            },
+            key="recurring_editor",
+        )
+        panel_end()
 
-    panel_start(
-        "3. Jubilación AFP estimada",
-        "Calcula una pensión real aproximada: saldo AFP + ahorro mensual AFP a retorno real, y luego retiro anual como % del saldo al jubilar. La pensión se indexa por inflación para que sea comparable con el retiro indexado."
-    )
-    afp_enable = st.checkbox("Agregar jubilación AFP calculada como ingreso recurrente", value=True)
-    afp1, afp2, afp3, afp4, afp5 = st.columns(5)
-    with afp1:
-        afp_balance_clp = money_text_input("Saldo AFP actual CLP", 0, key="afp_balance_clp_text")
-    with afp2:
-        afp_monthly_contribution_clp = money_text_input("Ahorro mensual AFP CLP", 0, key="afp_monthly_contribution_clp_text")
-    with afp3:
-        afp_retirement_age = st.number_input("Edad jubilación AFP", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, value=min(max(65, int(edad_inicial)), EDAD_FINAL_FIJA), step=1)
-    with afp4:
-        afp_real_return_pct = st.number_input("Retorno real AFP anual (%)", min_value=-5.0, max_value=15.0, value=5.0, step=0.25)
-    with afp5:
-        afp_withdrawal_rate_pct = st.number_input("Tasa retiro AFP anual (%)", min_value=0.0, max_value=10.0, value=3.2, step=0.1)
+    with input_tabs[4]:
+        panel_start("Flujos esporádicos", "Plata que entra o sale una sola vez: bono, venta de activo, pie de propiedad, gasto grande, herencia, prepago, etc.")
+        default_lump_df = pd.DataFrame(
+            {
+                "descripcion": ["Ejemplo bono / venta activo"],
+                "tipo": ["Ingreso"],
+                "edad_evento": [31],
+                "monto_clp": ["40.000.000"],
+            }
+        )
+        lump_df = st.data_editor(
+            default_lump_df,
+            num_rows="dynamic",
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "descripcion": st.column_config.TextColumn("Descripción"),
+                "tipo": st.column_config.SelectboxColumn("Tipo", options=["Ingreso", "Egreso"], required=True),
+                "edad_evento": st.column_config.NumberColumn("Edad evento", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
+                "monto_clp": st.column_config.TextColumn("Monto CLP", help="Ej: 25.000.000 o 25 MM."),
+            },
+            key="lump_editor",
+        )
+        panel_end()
 
-    months_to_afp = max(int(round((float(afp_retirement_age) - float(edad_inicial)) * 12)), 0)
-    afp_fv_real_clp = future_value_monthly_real_clp(
-        initial_balance_clp=afp_balance_clp,
-        monthly_contribution_clp=afp_monthly_contribution_clp,
-        annual_real_return=float(afp_real_return_pct) / 100,
-        n_months=months_to_afp,
-        contribution_timing="end",
-    )
-    afp_monthly_pension_real_clp = afp_fv_real_clp * (float(afp_withdrawal_rate_pct) / 100) / 12
-    afp_monthly_inflation = (1 + float(inflation_annual_pct) / 100) ** (1 / 12) - 1 if float(inflation_annual_pct) > -100 else 0.0
-    afp_monthly_pension_nominal_start_clp = afp_monthly_pension_real_clp * (1 + afp_monthly_inflation) ** months_to_afp
+    with input_tabs[5]:
+        panel_start("Retorno, riesgo y simulación", "El modo mensual IID captura mejor el riesgo de secuencia durante el retiro; el anual suavizado replica mejor el código original.")
+        r1, r2, r3, r4, r5 = st.columns(5)
+        with r1:
+            return_model_es = st.selectbox("Modelo retorno", ["Mensual IID más realista para retiro", "Anual suavizado como código original"], index=0)
+        with r2:
+            annual_return_mean_pct = st.number_input("Retorno anual esperado (%)", value=10.0, step=0.5)
+        with r3:
+            annual_return_std_pct = st.number_input("Volatilidad anual (%)", min_value=0.1, value=5.0, step=0.5)
+        with r4:
+            annual_return_low_pct = st.number_input("Mínimo truncado (%)", value=-55.0, step=1.0)
+        with r5:
+            annual_return_high_pct = st.number_input("Máximo truncado (%)", value=25.0, step=1.0)
 
-    ap1, ap2, ap3 = st.columns(3)
-    with ap1:
-        st.markdown(f"""<div class="definition-card"><b>Saldo AFP estimado al jubilar</b><br><span>{fmt_clp(afp_fv_real_clp)} en pesos de hoy</span></div>""", unsafe_allow_html=True)
-    with ap2:
-        st.markdown(f"""<div class="definition-card"><b>Pensión mensual real estimada</b><br><span>{fmt_clp(afp_monthly_pension_real_clp)} en pesos de hoy</span></div>""", unsafe_allow_html=True)
-    with ap3:
-        st.markdown(f"""<div class="definition-card"><b>Pensión nominal al inicio</b><br><span>{fmt_clp(afp_monthly_pension_nominal_start_clp)} a los {int(afp_retirement_age)} años</span></div>""", unsafe_allow_html=True)
-    st.caption("La pensión se agrega como ingreso recurrente indexado por inflación desde hoy. Si el ahorro AFP ya está incluido dentro de tus tramos de ahorro patrimonial, evita duplicarlo.")
-    panel_end()
-
-    panel_start("4. Otros ingresos o egresos mensuales recurrentes", "Ejemplos: arriendo de propiedades, dividendo, gastos familiares. Puedes marcar indexación para que el monto escrito en pesos de hoy crezca con inflación.")
-    default_recurring_df = pd.DataFrame(
-        {
-            "descripcion": ["Arriendo propiedades", "Otro ingreso", "Gasto familiar"],
-            "tipo": ["Ingreso", "Ingreso", "Egreso"],
-            "edad_inicio": [max(40, int(edad_inicial)), max(65, int(edad_inicial)), max(30, int(edad_inicial))],
-            "edad_fin": [90, 90, 90],
-            "monto_mensual_clp": ["0", "0", "0"],
-            "indexar_inflacion": [True, True, True],
-        }
-    )
-    recurring_df = st.data_editor(
-        default_recurring_df,
-        num_rows="dynamic",
-        width="stretch",
-        column_config={
-            "descripcion": st.column_config.TextColumn("Descripción"),
-            "tipo": st.column_config.SelectboxColumn("Tipo", options=["Ingreso", "Egreso"], required=True),
-            "edad_inicio": st.column_config.NumberColumn("Edad inicio", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
-            "edad_fin": st.column_config.NumberColumn("Edad fin", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
-            "monto_mensual_clp": st.column_config.TextColumn("Monto mensual CLP", help="Escribe con separadores, por ejemplo 1.200.000 o 1,2 MM. Si marcas indexación, se interpreta como pesos de hoy."),
-            "indexar_inflacion": st.column_config.CheckboxColumn("Indexar inflación", help="Si está marcado, el monto crece con inflación desde hoy."),
-        },
-        key="recurring_editor",
-    )
-    # Se eliminó la vista duplicada con separadores bajo el editor.
-    panel_end()
-
-    panel_start("5. Flujos esporádicos", "Plata que entra o sale una sola vez: bono, venta de activo, pie de propiedad, gasto grande, herencia, prepago, etc.")
-    default_lump_df = pd.DataFrame(
-        {
-            "descripcion": ["Ejemplo bono / venta activo"],
-            "tipo": ["Ingreso"],
-            "edad_evento": [40],
-            "monto_clp": ["0"],
-        }
-    )
-    lump_df = st.data_editor(
-        default_lump_df,
-        num_rows="dynamic",
-        width="stretch",
-        column_config={
-            "descripcion": st.column_config.TextColumn("Descripción"),
-            "tipo": st.column_config.SelectboxColumn("Tipo", options=["Ingreso", "Egreso"], required=True),
-            "edad_evento": st.column_config.NumberColumn("Edad evento", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
-            "monto_clp": st.column_config.TextColumn("Monto CLP", help="Escribe con separadores, por ejemplo 25.000.000 o 25 MM."),
-        },
-        key="lump_editor",
-    )
-    # Se eliminó la vista duplicada con separadores bajo el editor.
-    panel_end()
-
-    panel_start("6. Retorno, riesgo y simulación", "El modo mensual IID captura mejor el riesgo de secuencia durante el retiro; el anual suavizado replica mejor el código original.")
-    r1, r2, r3, r4, r5 = st.columns(5)
-    with r1:
-        return_model_es = st.selectbox("Modelo retorno", ["Mensual IID más realista para retiro", "Anual suavizado como código original"], index=0)
-    with r2:
-        annual_return_mean_pct = st.number_input("Retorno anual esperado (%)", value=10.0, step=0.5)
-    with r3:
-        annual_return_std_pct = st.number_input("Volatilidad anual (%)", min_value=0.1, value=5.0, step=0.5)
-    with r4:
-        annual_return_low_pct = st.number_input("Mínimo truncado (%)", value=-55.0, step=1.0)
-    with r5:
-        annual_return_high_pct = st.number_input("Máximo truncado (%)", value=25.0, step=1.0)
-
-    s1, s2, s3, s4 = st.columns(4)
-    with s1:
-        n_paths = st.number_input("Simulaciones", min_value=1_000, max_value=100_000, value=30_000, step=5_000, format="%d")
-    with s2:
-        seed = st.number_input("Seed", min_value=0, max_value=999_999, value=123, step=1)
-    with s3:
-        floor_zero = st.checkbox("Patrimonio no negativo", value=True)
-    with s4:
-        mean_is_effective = st.checkbox("Calibrar media truncada", value=True)
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            n_paths = st.number_input("Simulaciones", min_value=1_000, max_value=100_000, value=30_000, step=5_000, format="%d")
+        with s2:
+            seed = st.number_input("Seed", min_value=0, max_value=999_999, value=123, step=1)
+        with s3:
+            floor_zero = st.checkbox("Patrimonio no negativo", value=True)
+        with s4:
+            mean_is_effective = st.checkbox("Calibrar media truncada", value=True)
+        panel_end()
 
     submitted = st.form_submit_button("Simular escenario", type="primary")
-    panel_end()
 
 
 # ============================================================
