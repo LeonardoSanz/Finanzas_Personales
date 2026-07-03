@@ -138,6 +138,7 @@ def monte_carlo_accumulation_withdrawal_mm(
     seed: Optional[int] = 123,
     mean_is_effective: bool = True,
     lump_sum_events: Optional[tuple[tuple[int, float], ...]] = None,
+    recurring_monthly_events: Optional[tuple[tuple[float, Optional[float], float, str], ...]] = None,
     floor_zero: bool = True,
     return_model: Literal["annual_smooth", "monthly_iid"] = "annual_smooth",
     withdrawal_indexed_to_inflation: bool = False,
@@ -150,6 +151,11 @@ def monte_carlo_accumulation_withdrawal_mm(
     2) Retiro: ahorro mensual = 0 y retiro fijo mensual desde edad_inicio_retiro.
 
     La simulación trabaja en meses, pero los snapshots se muestran por edad/año.
+
+    recurring_monthly_events permite agregar ingresos o egresos mensuales recurrentes,
+    por ejemplo jubilación o arriendos desde cierta edad.
+    Formato: (edad_inicio, edad_fin_opcional, monto_mensual_mm, descripción).
+    Monto positivo = ingreso; monto negativo = egreso.
     """
     if edad_final <= edad_inicial:
         raise ValueError("edad_final debe ser mayor que edad_inicial")
@@ -253,6 +259,45 @@ def monte_carlo_accumulation_withdrawal_mm(
             withdrawal_schedule[retirement_start_month:] = withdrawal_monthly_mm
 
     # -----------------------------
+    # Ingresos / egresos mensuales recurrentes externos
+    # Ejemplos: jubilación, arriendo de propiedades, pensión, costos recurrentes.
+    # Se aplica al final del mes para mantener la lectura simple.
+    # -----------------------------
+    recurring_cashflows = np.zeros(months, dtype=np.float64)
+    recurring_event_rows = []
+    if recurring_monthly_events is not None:
+        for start_age, end_age, monthly_amount_mm, description in recurring_monthly_events:
+            if monthly_amount_mm == 0:
+                continue
+            if start_age < edad_inicial:
+                start_month = 0
+            else:
+                start_month = int(round((float(start_age) - edad_inicial) * 12))
+            if end_age is None or (isinstance(end_age, float) and np.isnan(end_age)):
+                end_month = months
+                end_age_clean = edad_final
+            else:
+                end_month = int(round((float(end_age) - edad_inicial) * 12))
+                end_age_clean = float(end_age)
+
+            start_month = min(max(start_month, 0), months)
+            end_month = min(max(end_month, 0), months)
+            if end_month <= start_month:
+                continue
+
+            recurring_cashflows[start_month:end_month] += float(monthly_amount_mm)
+            recurring_event_rows.append(
+                {
+                    "edad_inicio": float(start_age),
+                    "edad_fin": end_age_clean,
+                    "monto_mensual_mm": float(monthly_amount_mm),
+                    "descripcion": str(description),
+                    "mes_inicio": start_month + 1,
+                    "mes_fin": end_month,
+                }
+            )
+
+    # -----------------------------
     # Paths
     # -----------------------------
     paths = np.empty((n_paths, months + 1), dtype=np.float64)
@@ -264,6 +309,7 @@ def monte_carlo_accumulation_withdrawal_mm(
         r_t = monthly_returns[:, t]
         savings_t = monthly_savings[:, t]
         lump_t = lump_sums[t]
+        recurring_t = recurring_cashflows[t]
         withdrawal_t = withdrawal_schedule[t]
 
         wealth = paths[:, t].copy()
@@ -278,6 +324,9 @@ def monte_carlo_accumulation_withdrawal_mm(
 
         if contribution_timing == "end":
             wealth = wealth + savings_t + lump_t
+
+        # Flujos externos recurrentes se reciben/pagan al final del mes.
+        wealth = wealth + recurring_t
 
         if withdrawal_timing == "end":
             wealth = wealth - withdrawal_t
@@ -300,6 +349,9 @@ def monte_carlo_accumulation_withdrawal_mm(
     total_savings = monthly_savings.sum(axis=1)
     total_lump_sums = lump_sums.sum()
     total_withdrawal_requested = withdrawal_schedule.sum()
+    total_recurring_inflows = recurring_cashflows[recurring_cashflows > 0].sum()
+    total_recurring_outflows = -recurring_cashflows[recurring_cashflows < 0].sum()
+    total_recurring_net = recurring_cashflows.sum()
 
     def pct(x: np.ndarray, q: float) -> float:
         return float(np.percentile(x, q))
@@ -379,6 +431,7 @@ def monte_carlo_accumulation_withdrawal_mm(
             "loc_used_pre_truncation": loc_used,
             "effective_truncated_mean_annualized": effective_mean,
             "lump_sum_events": lump_sum_events,
+            "recurring_monthly_events": recurring_monthly_events,
             "floor_zero": floor_zero,
             "return_model": return_model,
             "withdrawal_indexed_to_inflation": withdrawal_indexed_to_inflation,
@@ -392,6 +445,8 @@ def monte_carlo_accumulation_withdrawal_mm(
         "monthly_savings_mm": monthly_savings,
         "monthly_returns": monthly_returns,
         "lump_sums_mm": lump_sums,
+        "recurring_cashflows_mm": recurring_cashflows,
+        "recurring_event_rows": recurring_event_rows,
         "withdrawal_schedule_mm": withdrawal_schedule,
         "ruin_month": ruin_month,
         "ruin_age": ruin_age,
@@ -402,6 +457,10 @@ def monte_carlo_accumulation_withdrawal_mm(
         "prob_final_above_retirement_wealth": prob_final_above_retirement_wealth,
         "total_lump_sums_mm": total_lump_sums,
         "total_withdrawal_requested_mm": total_withdrawal_requested,
+        "total_recurring_inflows_mm": total_recurring_inflows,
+        "total_recurring_outflows_mm": total_recurring_outflows,
+        "total_recurring_net_mm": total_recurring_net,
+        "total_net_cash_need_mm": total_withdrawal_requested - total_recurring_inflows + total_recurring_outflows,
     }
 
 
@@ -417,6 +476,7 @@ def tabla_monte_carlo_por_edad(result: dict) -> pd.DataFrame:
     monthly_savings = result["monthly_savings_mm"]
     withdrawal_schedule = result["withdrawal_schedule_mm"]
     lump_sums = result["lump_sums_mm"]
+    recurring_cashflows = result.get("recurring_cashflows_mm", np.zeros_like(lump_sums))
 
     rows = []
     for year in range(0, years + 1):
@@ -428,10 +488,16 @@ def tabla_monte_carlo_por_edad(result: dict) -> pd.DataFrame:
             m1 = (year + 1) * 12
             ahorro_prom_mensual = float(np.mean(monthly_savings[:, m0:m1]))
             retiro_prom_mensual = float(np.mean(withdrawal_schedule[m0:m1]))
+            flujo_recurrente_prom_mensual = float(np.mean(recurring_cashflows[m0:m1]))
+            ingreso_recurrente_prom_mensual = float(np.mean(np.maximum(recurring_cashflows[m0:m1], 0)))
+            egreso_recurrente_prom_mensual = float(np.mean(np.maximum(-recurring_cashflows[m0:m1], 0)))
             aporte_extra_anual = float(np.sum(lump_sums[m0:m1]))
         else:
             ahorro_prom_mensual = 0.0
             retiro_prom_mensual = 0.0
+            flujo_recurrente_prom_mensual = 0.0
+            ingreso_recurrente_prom_mensual = 0.0
+            egreso_recurrente_prom_mensual = 0.0
             aporte_extra_anual = 0.0
 
         prob_sobre_target = np.nan if target_mm is None else float(np.mean(data >= target_mm))
@@ -451,6 +517,9 @@ def tabla_monte_carlo_por_edad(result: dict) -> pd.DataFrame:
                 "prob_sobre_cero": prob_sobre_cero,
                 "ahorro_prom_mensual_mm": ahorro_prom_mensual,
                 "retiro_prom_mensual_mm": retiro_prom_mensual,
+                "ingreso_recurrente_prom_mensual_mm": ingreso_recurrente_prom_mensual,
+                "egreso_recurrente_prom_mensual_mm": egreso_recurrente_prom_mensual,
+                "flujo_recurrente_neto_mensual_mm": flujo_recurrente_prom_mensual,
                 "aporte_extra_anual_mm": aporte_extra_anual,
             }
         )
@@ -465,6 +534,9 @@ def tabla_monte_carlo_por_edad(result: dict) -> pd.DataFrame:
         "p95_mm",
         "ahorro_prom_mensual_mm",
         "retiro_prom_mensual_mm",
+        "ingreso_recurrente_prom_mensual_mm",
+        "egreso_recurrente_prom_mensual_mm",
+        "flujo_recurrente_neto_mensual_mm",
         "aporte_extra_anual_mm",
     ]
     tabla[monto_cols] = tabla[monto_cols].round(2)
