@@ -375,12 +375,19 @@ def monte_carlo_accumulation_withdrawal_mm(
     # -----------------------------
     # Retiros mensuales fijos
     # -----------------------------
+    # Importante: si el retiro está indexado, withdrawal_monthly_mm se interpreta
+    # como pesos de hoy, exactamente igual que los arriendos/ingresos recurrentes
+    # indexados. Por eso la indexación parte en edad_inicial, no en la edad de retiro.
+    #
+    # Ejemplo: edad inicial 27, retiro desde 42, retiro mensual hoy = 5 MM,
+    # inflación 3%. El primer retiro nominal a los 42 será:
+    # 5 MM * (1+inflación_mensual)^(15*12), no 5 MM plano.
     withdrawal_schedule = np.zeros(months, dtype=np.float64)
     if retirement_start_month < months and withdrawal_monthly_mm > 0:
         if withdrawal_indexed_to_inflation:
             monthly_inflation = (1 + inflation_annual) ** (1 / 12) - 1
-            k = np.arange(months - retirement_start_month)
-            withdrawal_schedule[retirement_start_month:] = withdrawal_monthly_mm * (1 + monthly_inflation) ** k
+            month_index = np.arange(retirement_start_month, months, dtype=np.float64)
+            withdrawal_schedule[retirement_start_month:] = withdrawal_monthly_mm * (1 + monthly_inflation) ** month_index
         else:
             withdrawal_schedule[retirement_start_month:] = withdrawal_monthly_mm
 

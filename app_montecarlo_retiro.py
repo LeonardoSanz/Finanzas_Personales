@@ -48,6 +48,7 @@ PERCENTILE_COLORS = {
 }
 
 EDAD_FINAL_FIJA = 90
+APP_VERSION = "2026-07-03-v9-cache-session-reset"
 
 
 # ============================================================
@@ -589,6 +590,32 @@ def survival_tone(pct: float) -> str:
     if pct >= 70:
         return "warn"
     return "bad"
+
+
+# ============================================================
+# Limpieza de sesión/cache
+# ============================================================
+
+def clear_runtime_state(keep_auth: bool = True) -> None:
+    """Limpia resultados guardados y caches de Streamlit.
+
+    Esto evita que una versión nueva de la app intente leer columnas o
+    estructuras antiguas guardadas en session_state después de un deploy.
+    """
+    was_authenticated = bool(st.session_state.get("mc_authenticated", False))
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    if keep_auth and was_authenticated:
+        st.session_state["mc_authenticated"] = True
+    st.session_state["mc_app_version"] = APP_VERSION
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+    try:
+        st.cache_resource.clear()
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -1437,6 +1464,11 @@ st.set_page_config(
 inject_css()
 password_gate()
 
+# Si Streamlit mantiene estado antiguo después de un deploy, se limpia automáticamente.
+if st.session_state.get("mc_app_version") != APP_VERSION:
+    clear_runtime_state(keep_auth=True)
+    st.rerun()
+
 st.markdown(
     f"""
     <div class="quant-hero">
@@ -1455,6 +1487,17 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+ctrl_cache, ctrl_logout, ctrl_spacer = st.columns([1.25, 1.0, 5.0])
+with ctrl_cache:
+    if st.button("Limpiar sesión/cache", help="Borra resultados guardados de esta sesión y fuerza un recálculo limpio."):
+        clear_runtime_state(keep_auth=True)
+        st.rerun()
+with ctrl_logout:
+    if st.button("Cerrar sesión", help="Cierra el acceso protegido de esta sesión."):
+        clear_runtime_state(keep_auth=False)
+        st.rerun()
 
 # ============================================================
 # Inputs en pantalla principal
@@ -1527,7 +1570,11 @@ with st.form("formulario_simulacion"):
         with c6:
             withdrawal_monthly_clp = money_text_input("Retiro mensual fijo CLP", 5_000_000, key="withdrawal_monthly_clp_text")
         with c7:
-            withdrawal_indexed_to_inflation = st.checkbox("Indexar retiro por inflación", value=True)
+            withdrawal_indexed_to_inflation = st.checkbox(
+                "Indexar retiro por inflación desde hoy",
+                value=True,
+                help="El monto escrito es en pesos de hoy. Si retiras más adelante, el primer retiro nominal ya llega inflado desde la edad inicial.",
+            )
         with c8:
             inflation_annual_pct = st.number_input("Inflación anual indexación (%)", min_value=0.0, value=3.0, step=0.25)
         panel_end()
@@ -1650,7 +1697,7 @@ with st.form("formulario_simulacion"):
     with input_tabs[3]:
         panel_start(
             "Otros ingresos o egresos mensuales recurrentes",
-            "Arriendos, dividendos, gastos familiares u otros flujos mensuales. Si marcas indexación, el monto escrito en pesos de hoy crece con inflación.",
+            "Arriendos, dividendos, gastos familiares u otros flujos mensuales. Si marcas indexación, el monto escrito en pesos de hoy crece con inflación desde hoy.",
         )
         default_recurring_df = pd.DataFrame(
             {
@@ -2195,7 +2242,7 @@ with tab2:
 with tab3:
     st.info(
         "Lectura: los flujos esporádicos positivos aumentan el patrimonio una sola vez; los negativos lo reducen una sola vez. "
-        "Después de ese mes, el patrimonio resultante sigue rentando con el modelo de retorno. Los flujos recurrentes indexados, como arriendos o AFP, sí crecen mes a mes con inflación."
+        "Después de ese mes, el patrimonio resultante sigue rentando con el modelo de retorno. Los flujos recurrentes indexados, como arriendos o AFP, sí crecen mes a mes con inflación desde hoy. El retiro indexado usa la misma lógica: el monto escrito es pesos de hoy y el primer retiro futuro ya llega ajustado."
     )
     st.plotly_chart(plot_cashflow_schedule(result), width="stretch")
     if result.get("afp_info", {}).get("enabled"):
@@ -2352,5 +2399,5 @@ with tab7:
 st.divider()
 st.caption(
     "Nota: esto es una herramienta de simulación, no una recomendación financiera. "
-    "El motor mantiene cálculos internos en MM CLP para estabilidad numérica, pero la interfaz muestra los montos en CLP con todos los ceros. Los flujos marcados como indexados se interpretan como pesos de hoy y crecen con inflación."
+    "El motor mantiene cálculos internos en MM CLP para estabilidad numérica, pero la interfaz muestra los montos en CLP con todos los ceros. Los flujos marcados como indexados y el retiro indexado se interpretan como pesos de hoy y crecen con inflación desde hoy."
 )

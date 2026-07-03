@@ -58,13 +58,15 @@ La edad final está fija en **90 años**.
   - línea de flujo neto mensual antes del retorno,
   - diamantes para flujos esporádicos del año.
 - Cortes P5/P50/P95 en la distribución final con etiquetas escalonadas para que no se tapen.
-- Alertas interpretativas para retiro indexado, flujos indexados e IID mensual.
+- Alertas interpretativas para retiro indexado desde hoy, flujos indexados e IID mensual.
 
 ## Nueva lógica de indexación
 
-El retiro fijo puede indexarse por inflación. Ahora los **ingresos recurrentes** también pueden indexarse, de modo que jubilación y arriendos no queden artificialmente planos mientras el retiro sube.
+El retiro fijo puede indexarse por inflación. Ahora usa la misma lógica que arriendos, AFP e ingresos recurrentes: el monto escrito se interpreta como **pesos de hoy** y se lleva a monto nominal futuro **desde la edad inicial**, no desde la edad en que comienza el retiro.
 
-Para los flujos marcados como `Indexar inflación`, el monto se interpreta como **pesos de hoy**. El motor lo lleva a monto nominal de cada edad aplicando la inflación anual configurada.
+Esto significa que si hoy configuras un retiro de `$5.000.000`, edad inicial 27, retiro desde 42 e inflación 3%, el primer retiro nominal a los 42 ya será mayor a `$5.000.000`, porque habrá sido indexado durante 15 años.
+
+Para los flujos marcados como `Indexar inflación`, el monto también se interpreta como **pesos de hoy**. El motor lo lleva a monto nominal de cada edad aplicando la inflación anual configurada.
 
 Ejemplo:
 
@@ -90,7 +92,7 @@ La fórmula trabaja en pesos reales/de hoy:
 2. Al jubilar, calcula una pensión mensual como `saldo al jubilar × tasa de retiro anual / 12`.
 3. Esa pensión se agrega como ingreso recurrente indexado por inflación desde hoy.
 
-Esto evita el problema de comparar un retiro indexado con una jubilación/arriendo plano.
+Esto evita el problema de comparar un retiro indexado desde hoy con una jubilación/arriendo plano.
 
 
 ## Diferencia entre modelos de retorno
