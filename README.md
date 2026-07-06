@@ -58,15 +58,13 @@ La edad final está fija en **90 años**.
   - línea de flujo neto mensual antes del retorno,
   - diamantes para flujos esporádicos del año.
 - Cortes P5/P50/P95 en la distribución final con etiquetas escalonadas para que no se tapen.
-- Alertas interpretativas para retiro indexado desde hoy, flujos indexados e IID mensual.
+- Alertas interpretativas para retiro indexado, flujos indexados e IID mensual.
 
 ## Nueva lógica de indexación
 
-El retiro fijo puede indexarse por inflación. Ahora usa la misma lógica que arriendos, AFP e ingresos recurrentes: el monto escrito se interpreta como **pesos de hoy** y se lleva a monto nominal futuro **desde la edad inicial**, no desde la edad en que comienza el retiro.
+El retiro fijo puede indexarse por inflación. Ahora los **ingresos recurrentes** también pueden indexarse, de modo que jubilación y arriendos no queden artificialmente planos mientras el retiro sube.
 
-Esto significa que si hoy configuras un retiro de `$5.000.000`, edad inicial 27, retiro desde 42 e inflación 3%, el primer retiro nominal a los 42 ya será mayor a `$5.000.000`, porque habrá sido indexado durante 15 años.
-
-Para los flujos marcados como `Indexar inflación`, el monto también se interpreta como **pesos de hoy**. El motor lo lleva a monto nominal de cada edad aplicando la inflación anual configurada.
+Para los flujos marcados como `Indexar inflación`, el monto se interpreta como **pesos de hoy**. El motor lo lleva a monto nominal de cada edad aplicando la inflación anual configurada.
 
 Ejemplo:
 
@@ -92,7 +90,7 @@ La fórmula trabaja en pesos reales/de hoy:
 2. Al jubilar, calcula una pensión mensual como `saldo al jubilar × tasa de retiro anual / 12`.
 3. Esa pensión se agrega como ingreso recurrente indexado por inflación desde hoy.
 
-Esto evita el problema de comparar un retiro indexado desde hoy con una jubilación/arriendo plano.
+Esto evita el problema de comparar un retiro indexado con una jubilación/arriendo plano.
 
 
 ## Diferencia entre modelos de retorno
@@ -233,31 +231,16 @@ Se agregó una capa visual superior con flujo de trabajo por módulos:
 
 La app sigue siendo avanzada, pero queda más vendible visualmente y menos saturada al ingresar parámetros.
 
-## Diagnóstico FIRE / Coast FIRE
+## Matriz de capital requerido
 
-Se agregó un nuevo tab **FIRE / Coast FIRE** con un cálculo aparte basado en los mismos supuestos del escenario simulado.
+La app incluye un tab **Matriz retiro**. Esta herramienta calcula cuánto capital deberías tener a distintas edades para comenzar a retirar el monto mensual deseado y llegar hasta los 90 años con una probabilidad objetivo de éxito.
 
-El usuario define una probabilidad mínima de éxito, por defecto `90%`, y la app prueba edades candidatas desde la edad inicial hasta la edad de retiro objetivo.
+La lectura es:
 
-### FIRE anticipado
+- Columnas: edad a la que comienzas a retirar.
+- Filas: probabilidad de éxito objetivo, por ejemplo 80%, 90% o 95%.
+- Celda: capital requerido en esa edad, en CLP.
 
-Pregunta:
+La matriz usa los mismos supuestos del escenario actual: retorno, volatilidad, retiro mensual, inflación, AFP, arriendos, egresos recurrentes y eventos únicos futuros. No incluye ahorro antes de esa edad, porque la pregunta es cuánto capital necesitas tener ya acumulado en ese momento.
 
-> ¿Cuál es la edad más temprana desde la cual podría empezar a retirar el monto mensual deseado y mantener alta probabilidad de no agotar patrimonio hasta los 90?
-
-La métrica principal es `prob_no_agotar_pct`.
-
-### Coast FIRE
-
-Pregunta:
-
-> ¿Desde qué edad podría dejar de aportar capital nuevo y, aun así, jubilarme en la edad objetivo con buena probabilidad de éxito?
-
-Se muestran dos lecturas:
-
-- **Coast FIRE robusto:** primera edad donde se puede dejar de ahorrar y mantener probabilidad de no agotarse hasta los 90 mayor o igual al umbral.
-- **Coast a la meta:** primera edad donde se puede dejar de ahorrar y llegar a la meta patrimonial en la edad objetivo con probabilidad mayor o igual al umbral.
-
-El diagnóstico usa una cantidad menor de simulaciones que el escenario principal para no volver lenta la app. Por defecto usa hasta `8.000` simulaciones, editable en el tab.
-
-El resultado puede descargarse como CSV individual y también queda incluido dentro del ZIP completo si ya fue calculado.
+El cálculo usa una simulación adicional y una recursión hacia atrás por path: para cada trayectoria de retornos calcula el capital mínimo que habría permitido no agotar el patrimonio hasta los 90. Luego toma el percentil asociado a la probabilidad objetivo.

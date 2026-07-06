@@ -375,19 +375,12 @@ def monte_carlo_accumulation_withdrawal_mm(
     # -----------------------------
     # Retiros mensuales fijos
     # -----------------------------
-    # Importante: si el retiro está indexado, withdrawal_monthly_mm se interpreta
-    # como pesos de hoy, exactamente igual que los arriendos/ingresos recurrentes
-    # indexados. Por eso la indexación parte en edad_inicial, no en la edad de retiro.
-    #
-    # Ejemplo: edad inicial 27, retiro desde 42, retiro mensual hoy = 5 MM,
-    # inflación 3%. El primer retiro nominal a los 42 será:
-    # 5 MM * (1+inflación_mensual)^(15*12), no 5 MM plano.
     withdrawal_schedule = np.zeros(months, dtype=np.float64)
     if retirement_start_month < months and withdrawal_monthly_mm > 0:
         if withdrawal_indexed_to_inflation:
             monthly_inflation = (1 + inflation_annual) ** (1 / 12) - 1
-            month_index = np.arange(retirement_start_month, months, dtype=np.float64)
-            withdrawal_schedule[retirement_start_month:] = withdrawal_monthly_mm * (1 + monthly_inflation) ** month_index
+            k = np.arange(months - retirement_start_month)
+            withdrawal_schedule[retirement_start_month:] = withdrawal_monthly_mm * (1 + monthly_inflation) ** k
         else:
             withdrawal_schedule[retirement_start_month:] = withdrawal_monthly_mm
 
@@ -682,3 +675,335 @@ def tabla_monte_carlo_por_edad(result: dict) -> pd.DataFrame:
     tabla["prob_sobre_target"] = (tabla["prob_sobre_target"] * 100).round(2)
     tabla["prob_sobre_cero"] = (tabla["prob_sobre_cero"] * 100).round(2)
     return tabla
+
+
+# ============================================================
+# Matriz de capital requerido por edad y probabilidad de éxito
+# ============================================================
+
+def _build_retirement_cashflow_schedule_mm(
+    *,
+    edad_inicio: int,
+    edad_final: int,
+    withdrawal_monthly_mm: float,
+    withdrawal_timing: Literal["begin", "end"] = "end",
+    withdrawal_indexed_to_inflation: bool = False,
+    inflation_annual: float = 0.0,
+    recurring_monthly_events: Optional[tuple[tuple, ...]] = None,
+    lump_sum_age_events: Optional[tuple[tuple[float, float], ...]] = None,
+) -> dict:
+    """Construye flujos futuros desde una edad específica.
+
+    Los eventos recurrentes usan edades absolutas. Los eventos únicos también.
+    Monto positivo = entrada de caja; monto negativo = salida de caja.
+    El retiro se trata como salida de caja.
+    """
+    if edad_final <= edad_inicio:
+        return {
+            "months": 0,
+            "withdrawal_schedule_mm": np.array([], dtype=np.float64),
+            "recurring_cashflows_mm": np.array([], dtype=np.float64),
+            "lump_sums_mm": np.array([], dtype=np.float64),
+            "net_end_cashflows_mm": np.array([], dtype=np.float64),
+        }
+
+    months = int((edad_final - edad_inicio) * 12)
+    monthly_inflation = (1 + inflation_annual) ** (1 / 12) - 1 if inflation_annual > -1 else 0.0
+
+    withdrawal_schedule = np.zeros(months, dtype=np.float64)
+    if withdrawal_monthly_mm > 0:
+        if withdrawal_indexed_to_inflation:
+            k = np.arange(months, dtype=np.float64)
+            withdrawal_schedule[:] = float(withdrawal_monthly_mm) * (1 + monthly_inflation) ** k
+        else:
+            withdrawal_schedule[:] = float(withdrawal_monthly_mm)
+
+    recurring_cashflows = np.zeros(months, dtype=np.float64)
+    if recurring_monthly_events is not None:
+        for item in recurring_monthly_events:
+            if len(item) == 4:
+                start_age, end_age, monthly_amount_mm, _description = item
+                indexed_to_inflation = False
+                index_base_age = start_age
+            elif len(item) == 6:
+                start_age, end_age, monthly_amount_mm, _description, indexed_to_inflation, index_base_age = item
+            else:
+                raise ValueError("Cada flujo recurrente debe tener 4 o 6 campos")
+
+            if monthly_amount_mm == 0 or start_age is None:
+                continue
+
+            start_age_f = float(start_age)
+            end_age_f = float(edad_final) if end_age is None or (isinstance(end_age, float) and np.isnan(end_age)) else float(end_age)
+            start_age_f = max(start_age_f, float(edad_inicio))
+            end_age_f = min(end_age_f, float(edad_final))
+            if end_age_f <= start_age_f:
+                continue
+
+            start_month = int(round((start_age_f - edad_inicio) * 12))
+            end_month = int(round((end_age_f - edad_inicio) * 12))
+            start_month = min(max(start_month, 0), months)
+            end_month = min(max(end_month, 0), months)
+            if end_month <= start_month:
+                continue
+
+            if index_base_age is None or (isinstance(index_base_age, float) and np.isnan(index_base_age)):
+                index_base_age = edad_inicio
+
+            if indexed_to_inflation:
+                month_index = np.arange(start_month, end_month, dtype=np.float64)
+                k = month_index + (float(edad_inicio) - float(index_base_age)) * 12
+                flow = float(monthly_amount_mm) * (1 + monthly_inflation) ** k
+            else:
+                flow = np.full(end_month - start_month, float(monthly_amount_mm), dtype=np.float64)
+            recurring_cashflows[start_month:end_month] += flow
+
+    lump_sums = np.zeros(months, dtype=np.float64)
+    if lump_sum_age_events is not None:
+        for event_age, amount_mm in lump_sum_age_events:
+            if amount_mm == 0:
+                continue
+            event_age_f = float(event_age)
+            if event_age_f < edad_inicio or event_age_f > edad_final:
+                continue
+            month_idx = int(round((event_age_f - edad_inicio) * 12))
+            month_idx = min(max(month_idx, 0), months - 1)
+            lump_sums[month_idx] += float(amount_mm)
+
+    # Flujo neto aplicado al final del mes para el caso estándar de la app.
+    # Positivo ayuda al patrimonio; negativo lo consume.
+    net_end_cashflows = recurring_cashflows + lump_sums - withdrawal_schedule
+
+    return {
+        "months": months,
+        "withdrawal_schedule_mm": withdrawal_schedule,
+        "recurring_cashflows_mm": recurring_cashflows,
+        "lump_sums_mm": lump_sums,
+        "net_end_cashflows_mm": net_end_cashflows,
+    }
+
+
+def _simulate_required_capital_by_path_mm(
+    *,
+    rng: np.random.Generator,
+    n_paths: int,
+    months: int,
+    years: int,
+    annual_return_mean: float,
+    annual_return_std: float,
+    annual_return_low: float,
+    annual_return_high: float,
+    mean_is_effective: bool,
+    return_model: Literal["annual_smooth", "monthly_iid"],
+    net_end_cashflows_mm: np.ndarray,
+    withdrawal_schedule_mm: np.ndarray,
+    recurring_plus_lump_mm: np.ndarray,
+    withdrawal_timing: Literal["begin", "end"] = "end",
+) -> np.ndarray:
+    """Calcula capital mínimo por path mediante recursión hacia atrás.
+
+    Para cada secuencia de retornos, devuelve el capital inicial requerido para que
+    el patrimonio nunca sea negativo hasta el final del horizonte.
+    """
+    if months <= 0:
+        return np.zeros(n_paths, dtype=np.float64)
+
+    if return_model == "annual_smooth":
+        annual_returns, _, _ = _sample_truncated_normal(
+            rng=rng,
+            target_mean=annual_return_mean,
+            std=annual_return_std,
+            low=annual_return_low,
+            high=annual_return_high,
+            size=(n_paths, years),
+            mean_is_effective=mean_is_effective,
+        )
+        monthly_returns_by_year = ((1 + annual_returns) ** (1 / 12) - 1).astype(np.float32, copy=False)
+
+        required = np.zeros(n_paths, dtype=np.float64)
+        for t in range(months - 1, -1, -1):
+            year_idx = min(t // 12, years - 1)
+            r_t = monthly_returns_by_year[:, year_idx].astype(np.float64, copy=False)
+            growth = 1.0 + r_t
+            if withdrawal_timing == "begin":
+                # W_{t+1} = (W_t - retiro_t) * (1+r_t) + recurrente/lump_t
+                required = withdrawal_schedule_mm[t] + np.maximum(
+                    0.0,
+                    (required - recurring_plus_lump_mm[t]) / growth,
+                )
+            else:
+                # W_{t+1} = W_t * (1+r_t) + recurrente/lump_t - retiro_t
+                required = np.maximum(0.0, (required - net_end_cashflows_mm[t]) / growth)
+        return required
+
+    if return_model == "monthly_iid":
+        monthly_mean_target = (1 + annual_return_mean) ** (1 / 12) - 1
+        monthly_std = annual_return_std / np.sqrt(12)
+        monthly_low = (1 + annual_return_low) ** (1 / 12) - 1
+        monthly_high = (1 + annual_return_high) ** (1 / 12) - 1
+        monthly_loc, monthly_a, monthly_b, _ = _calibrate_truncated_normal(
+            target_mean=monthly_mean_target,
+            std=monthly_std,
+            low=monthly_low,
+            high=monthly_high,
+            mean_is_effective=mean_is_effective,
+        )
+        # Se guarda la matriz completa para poder recorrer hacia atrás.
+        monthly_returns = truncnorm.rvs(
+            a=monthly_a,
+            b=monthly_b,
+            loc=monthly_loc,
+            scale=monthly_std,
+            size=(n_paths, months),
+            random_state=rng,
+        ).astype(np.float32, copy=False)
+
+        required = np.zeros(n_paths, dtype=np.float64)
+        for t in range(months - 1, -1, -1):
+            growth = 1.0 + monthly_returns[:, t].astype(np.float64, copy=False)
+            if withdrawal_timing == "begin":
+                required = withdrawal_schedule_mm[t] + np.maximum(
+                    0.0,
+                    (required - recurring_plus_lump_mm[t]) / growth,
+                )
+            else:
+                required = np.maximum(0.0, (required - net_end_cashflows_mm[t]) / growth)
+        return required
+
+    raise ValueError("return_model debe ser 'annual_smooth' o 'monthly_iid'")
+
+
+def required_capital_matrix_mm(
+    *,
+    edad_final: int,
+    retirement_ages: tuple[int, ...],
+    success_probabilities: tuple[float, ...],
+    n_paths: int,
+    annual_return_mean: float,
+    annual_return_std: float,
+    annual_return_low: float,
+    annual_return_high: float,
+    withdrawal_monthly_mm: float,
+    withdrawal_timing: Literal["begin", "end"] = "end",
+    seed: Optional[int] = 456,
+    mean_is_effective: bool = True,
+    lump_sum_age_events: Optional[tuple[tuple[float, float], ...]] = None,
+    recurring_monthly_events: Optional[tuple[tuple, ...]] = None,
+    return_model: Literal["annual_smooth", "monthly_iid"] = "monthly_iid",
+    withdrawal_indexed_to_inflation: bool = False,
+    inflation_annual: float = 0.0,
+) -> dict:
+    """Calcula matriz de capital requerido para jubilar a distintas edades.
+
+    La celda (edad, probabilidad) es el capital inicial requerido en esa edad
+    para que el patrimonio no se agote antes de edad_final con esa probabilidad.
+
+    Matemáticamente, para cada path se calcula el capital mínimo que permite
+    sobrevivir hasta el final; luego la probabilidad deseada corresponde al
+    percentil de esa distribución de capital requerido.
+    """
+    if n_paths <= 0:
+        raise ValueError("n_paths debe ser > 0")
+    if not retirement_ages:
+        raise ValueError("Debes entregar al menos una edad")
+    if not success_probabilities:
+        raise ValueError("Debes entregar al menos una probabilidad de éxito")
+
+    ages = tuple(sorted({int(a) for a in retirement_ages if int(a) < int(edad_final)}))
+    probs = tuple(sorted({float(p) for p in success_probabilities}))
+    if any(p <= 0 or p >= 1 for p in probs):
+        raise ValueError("Las probabilidades de éxito deben estar entre 0 y 1")
+    if not ages:
+        raise ValueError("Todas las edades deben ser menores que edad_final")
+
+    rng_master = np.random.default_rng(seed)
+    long_rows = []
+    distribution_rows = []
+
+    for age in ages:
+        years = int(edad_final - age)
+        schedules = _build_retirement_cashflow_schedule_mm(
+            edad_inicio=age,
+            edad_final=edad_final,
+            withdrawal_monthly_mm=withdrawal_monthly_mm,
+            withdrawal_timing=withdrawal_timing,
+            withdrawal_indexed_to_inflation=withdrawal_indexed_to_inflation,
+            inflation_annual=inflation_annual,
+            recurring_monthly_events=recurring_monthly_events,
+            lump_sum_age_events=lump_sum_age_events,
+        )
+        months = int(schedules["months"])
+        seed_age = int(rng_master.integers(0, 2**32 - 1))
+        rng = np.random.default_rng(seed_age)
+        recurring_plus_lump = schedules["recurring_cashflows_mm"] + schedules["lump_sums_mm"]
+        required_by_path = _simulate_required_capital_by_path_mm(
+            rng=rng,
+            n_paths=n_paths,
+            months=months,
+            years=years,
+            annual_return_mean=annual_return_mean,
+            annual_return_std=annual_return_std,
+            annual_return_low=annual_return_low,
+            annual_return_high=annual_return_high,
+            mean_is_effective=mean_is_effective,
+            return_model=return_model,
+            net_end_cashflows_mm=schedules["net_end_cashflows_mm"],
+            withdrawal_schedule_mm=schedules["withdrawal_schedule_mm"],
+            recurring_plus_lump_mm=recurring_plus_lump,
+            withdrawal_timing=withdrawal_timing,
+        )
+
+        for p in probs:
+            required_mm = float(np.percentile(required_by_path, p * 100))
+            long_rows.append(
+                {
+                    "edad_jubilacion": age,
+                    "prob_exito": p,
+                    "prob_exito_pct": p * 100,
+                    "capital_requerido_mm": required_mm,
+                    "capital_requerido_clp": round(required_mm * 1_000_000, 0),
+                    "n_paths": int(n_paths),
+                    "modelo_retorno": return_model,
+                }
+            )
+
+        # Percentiles auxiliares para auditar la distribución por edad.
+        pcts = np.percentile(required_by_path, [50, 70, 80, 90, 95])
+        distribution_rows.append(
+            {
+                "edad_jubilacion": age,
+                "p50_mm": float(pcts[0]),
+                "p70_mm": float(pcts[1]),
+                "p80_mm": float(pcts[2]),
+                "p90_mm": float(pcts[3]),
+                "p95_mm": float(pcts[4]),
+                "promedio_mm": float(np.mean(required_by_path)),
+                "max_mm": float(np.max(required_by_path)),
+            }
+        )
+
+    long_df = pd.DataFrame(long_rows)
+    matrix_mm = long_df.pivot(index="prob_exito_pct", columns="edad_jubilacion", values="capital_requerido_mm").sort_index()
+    matrix_clp = long_df.pivot(index="prob_exito_pct", columns="edad_jubilacion", values="capital_requerido_clp").sort_index()
+    matrix_mm.columns = [int(c) for c in matrix_mm.columns]
+    matrix_clp.columns = [int(c) for c in matrix_clp.columns]
+    matrix_mm.index.name = "prob_exito_pct"
+    matrix_clp.index.name = "prob_exito_pct"
+
+    return {
+        "matrix_mm": matrix_mm,
+        "matrix_clp": matrix_clp,
+        "long": long_df,
+        "distribution_by_age": pd.DataFrame(distribution_rows),
+        "inputs": {
+            "edad_final": edad_final,
+            "retirement_ages": ages,
+            "success_probabilities": probs,
+            "n_paths": n_paths,
+            "return_model": return_model,
+            "withdrawal_monthly_mm": withdrawal_monthly_mm,
+            "withdrawal_indexed_to_inflation": withdrawal_indexed_to_inflation,
+            "inflation_annual": inflation_annual,
+            "seed": seed,
+        },
+    }
