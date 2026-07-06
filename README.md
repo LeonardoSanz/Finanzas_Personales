@@ -322,3 +322,15 @@ Se mantienen solo cuatro cards principales del escenario:
 - Cada fila permite definir edad inicio, edad fin y ahorro mensual esperado.
 - El mínimo y máximo ya no se ingresan manualmente: se calculan como ahorro esperado ±$500.000.
 - Si la indexación está activa, los montos de ahorro de cada tramo se interpretan como pesos de hoy y crecen con inflación hasta el retiro.
+
+## Reporte ejecutivo Excel para cliente
+
+Se agregó un exportador **Excel ejecutivo** pensado para explicar la simulación a una persona no financiera. El archivo incluye hojas en este orden:
+
+1. **Inputs**: supuestos principales, ahorro por edad, AFP, ingresos/gastos recurrentes y eventos únicos.
+2. **Flujos**: tabla anual por edad con ahorro, retiros, flujos recurrentes, eventos únicos y flujo neto antes de retorno.
+3. **FIRE / Coast**: edad FIRE anticipada, patrimonio para FIRE, edad Coast FIRE y detalle por edad.
+4. **Matriz FIRE**: matriz realista de capital nominal requerido, con colores y celdas “No alcanza”.
+5. **Percentiles**: evolución anual del patrimonio simulado.
+
+También se eliminó de la interfaz la vista/caption auxiliar de banda triangular para no ensuciar la pantalla. La lógica se mantiene: cada tramo usa ahorro esperado ±$500.000 por detrás.

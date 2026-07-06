@@ -1620,6 +1620,320 @@ def make_export_zip(
     return buffer.getvalue()
 
 
+def make_executive_excel_report(
+    result: dict,
+    tabla: pd.DataFrame,
+    saving_ranges_df: pd.DataFrame | None,
+    recurring_df: pd.DataFrame | None,
+    lump_df: pd.DataFrame | None,
+    afp_info: dict | None,
+    fire_analysis: dict | None = None,
+) -> bytes:
+    """Reporte ejecutivo en Excel, pensado para una persona no financiera.
+
+    Orden de lectura:
+    1) Inputs del escenario.
+    2) Flujos proyectados.
+    3) FIRE / Coast FIRE.
+    4) Matriz FIRE realista.
+    5) Tabla de percentiles por edad.
+    """
+    output = io.BytesIO()
+
+    with pd.ExcelWriter(output, engine="xlsxwriter", engine_kwargs={"options": {"nan_inf_to_errors": True}}) as writer:
+        wb = writer.book
+
+        # Paleta compatible con la app.
+        fmt_title = wb.add_format({"bold": True, "font_size": 20, "font_color": "#FFFFFF", "bg_color": "#041F5F"})
+        fmt_subtitle = wb.add_format({"font_size": 11, "font_color": "#B8C4D8", "bg_color": "#041F5F", "text_wrap": True})
+        fmt_section = wb.add_format({"bold": True, "font_size": 13, "font_color": "#FFFFFF", "bg_color": "#8B3DFF", "border": 0})
+        fmt_header = wb.add_format({"bold": True, "font_color": "#FFFFFF", "bg_color": "#102B66", "border": 1, "border_color": "#2E4A84"})
+        fmt_text = wb.add_format({"font_color": "#0B1F4A", "border": 1, "border_color": "#D9E2F3"})
+        fmt_note = wb.add_format({"font_color": "#102B66", "bg_color": "#EAF2FF", "text_wrap": True, "border": 1, "border_color": "#B8C4D8"})
+        fmt_money = wb.add_format({"num_format": '[$$-es-CL] #,##0', "font_color": "#0B1F4A", "border": 1, "border_color": "#D9E2F3"})
+        fmt_pct = wb.add_format({"num_format": "0.0%", "font_color": "#0B1F4A", "border": 1, "border_color": "#D9E2F3"})
+        fmt_num = wb.add_format({"num_format": "#,##0.0", "font_color": "#0B1F4A", "border": 1, "border_color": "#D9E2F3"})
+        fmt_int = wb.add_format({"num_format": "#,##0", "font_color": "#0B1F4A", "border": 1, "border_color": "#D9E2F3"})
+        fmt_good = wb.add_format({"bold": True, "font_color": "#FFFFFF", "bg_color": "#30D158", "border": 1, "border_color": "#30D158"})
+        fmt_warn = wb.add_format({"bold": True, "font_color": "#061844", "bg_color": "#FFD166", "border": 1, "border_color": "#FFD166"})
+        fmt_bad = wb.add_format({"bold": True, "font_color": "#FFFFFF", "bg_color": "#FF5C7A", "border": 1, "border_color": "#FF5C7A"})
+        fmt_card_label = wb.add_format({"bold": True, "font_color": "#B8C4D8", "bg_color": "#0B1F4A", "border": 1, "border_color": "#8B3DFF"})
+        fmt_card_value = wb.add_format({"bold": True, "font_size": 16, "font_color": "#FFFFFF", "bg_color": "#0B1F4A", "border": 1, "border_color": "#8B3DFF", "num_format": '[$$-es-CL] #,##0'})
+        fmt_card_pct = wb.add_format({"bold": True, "font_size": 16, "font_color": "#FFFFFF", "bg_color": "#0B1F4A", "border": 1, "border_color": "#8B3DFF", "num_format": "0.0%"})
+        fmt_blank_dark = wb.add_format({"bg_color": "#041F5F"})
+
+        def add_sheet(name: str):
+            ws = wb.add_worksheet(name)
+            writer.sheets[name] = ws
+            ws.hide_gridlines(2)
+            ws.set_tab_color("#8B3DFF")
+            return ws
+
+        def write_title(ws, title: str, subtitle: str):
+            ws.set_row(0, 30)
+            ws.merge_range(0, 0, 0, 8, title, fmt_title)
+            ws.merge_range(1, 0, 2, 8, subtitle, fmt_subtitle)
+            ws.set_row(1, 24)
+            ws.set_row(2, 24)
+
+        def safe_df(df: pd.DataFrame | None) -> pd.DataFrame:
+            if df is None:
+                return pd.DataFrame()
+            out = df.copy()
+            out = out.replace([np.inf, -np.inf], np.nan)
+            return out
+
+        def write_table(ws, df: pd.DataFrame, start_row: int, start_col: int = 0, title: str | None = None, money_cols: set[str] | None = None, pct_cols: set[str] | None = None, int_cols: set[str] | None = None) -> int:
+            df = safe_df(df)
+            money_cols = money_cols or set()
+            pct_cols = pct_cols or set()
+            int_cols = int_cols or set()
+            row = start_row
+            if title:
+                ws.merge_range(row, start_col, row, max(start_col + len(df.columns) - 1, start_col + 3), title, fmt_section)
+                row += 2
+            if df.empty:
+                ws.write(row, start_col, "Sin datos para esta sección", fmt_note)
+                return row + 3
+            for j, col in enumerate(df.columns):
+                ws.write(row, start_col + j, str(col), fmt_header)
+            for i, (_, data_row) in enumerate(df.iterrows(), start=1):
+                for j, col in enumerate(df.columns):
+                    val = data_row[col]
+                    fmt = fmt_text
+                    if col in money_cols:
+                        fmt = fmt_money
+                    elif col in pct_cols:
+                        fmt = fmt_pct
+                    elif col in int_cols:
+                        fmt = fmt_int
+                    elif isinstance(val, (int, float, np.integer, np.floating)) and pd.notna(val):
+                        fmt = fmt_num
+                    if pd.isna(val):
+                        ws.write_blank(row + i, start_col + j, None, fmt)
+                    elif isinstance(val, (int, float, np.integer, np.floating)):
+                        ws.write_number(row + i, start_col + j, float(val), fmt)
+                    else:
+                        ws.write(row + i, start_col + j, str(val), fmt)
+            ws.autofilter(row, start_col, row + len(df), start_col + len(df.columns) - 1)
+            return row + len(df) + 3
+
+        # Valores clave.
+        inputs = result.get("inputs", {})
+        summary = result["summary"].set_index("metric")
+        ret_p50_clp = float(summary.loc["p50", "wealth_at_retirement_mm"] * 1_000_000)
+        final_p50_clp = float(summary.loc["p50", "final_wealth_mm"] * 1_000_000)
+        prob_no_ruin_excel = float(result.get("prob_no_ruin", np.nan))
+        median_ruin_age = result.get("median_ruin_age", np.nan)
+        retirement_age = int(inputs.get("edad_inicio_retiro", 0))
+        retirement_month = int(inputs.get("retirement_start_month", 0))
+        withdrawal_schedule = result.get("withdrawal_schedule_mm", np.array([]))
+        first_withdrawal_nominal_clp = np.nan
+        if len(withdrawal_schedule) and 0 <= retirement_month < len(withdrawal_schedule):
+            first_withdrawal_nominal_clp = float(withdrawal_schedule[retirement_month] * 1_000_000)
+
+        # FIRE analysis derivado.
+        fire_scan = safe_df(fire_analysis.get("fire_scan") if fire_analysis else None)
+        coast_scan = safe_df(fire_analysis.get("coast_scan") if fire_analysis else None)
+        realistic_matrix = safe_df(fire_analysis.get("realistic_matrix_clp") if fire_analysis else None)
+        target_success_pct = float(fire_analysis.get("target_success_pct", 90.0)) if fire_analysis else 90.0
+        fire_row = find_fire_row(fire_scan, target_success_pct) if not fire_scan.empty else None
+        coast_row = None
+        if not coast_scan.empty:
+            coast_ok = coast_scan[coast_scan["prob_exito_pct"] >= target_success_pct].sort_values("edad_dejar_ahorrar")
+            coast_row = coast_ok.iloc[0] if not coast_ok.empty else None
+
+        # ----------------------------------------------------
+        # 01 Inputs
+        # ----------------------------------------------------
+        ws = add_sheet("01 Inputs")
+        write_title(
+            ws,
+            "Reporte de simulación FIRE",
+            "Lectura simple: primero revisa los supuestos cargados, luego los flujos, después la edad FIRE / Coast FIRE y finalmente la matriz. Todos los montos están en CLP nominales salvo cuando se indique 'pesos de hoy'.",
+        )
+        ws.set_column("A:A", 34)
+        ws.set_column("B:B", 24)
+        ws.set_column("C:C", 72)
+        inputs_df = pd.DataFrame(
+            [
+                ["Edad inicial", inputs.get("edad_inicial"), "Edad desde la cual empieza la simulación."],
+                ["Edad retiro elegida", inputs.get("edad_inicio_retiro"), "Escenario base cargado por ti."],
+                ["Edad final", inputs.get("edad_final"), "Horizonte de supervivencia del patrimonio."],
+                ["Capital inicial", fmt_clp(float(inputs.get("initial_capital_mm", 0)) * 1_000_000), "Patrimonio invertible inicial."],
+                ["Retiro mensual real deseado", fmt_clp(float(inputs.get("withdrawal_monthly_mm", 0)) * 1_000_000), "Monto en pesos de hoy que quieres recibir cada mes."],
+                ["Primer retiro nominal", fmt_clp(first_withdrawal_nominal_clp), "Monto mensual al inicio del retiro elegido, ya indexado si corresponde."],
+                ["Inflación anual", fmt_pct(float(inputs.get("inflation_annual", 0)) * 100), "Usada para indexar retiro, ahorro e ingresos marcados como indexados."],
+                ["Retorno anual esperado", fmt_pct(float(inputs.get("annual_return_mean_requested", 0)) * 100), "Media anual de retorno del portafolio."],
+                ["Volatilidad anual", fmt_pct(float(inputs.get("annual_return_std", 0)) * 100), "Riesgo anual simulado."],
+                ["Modelo de retorno", inputs.get("return_model", ""), "Mensual IID captura mejor riesgo de secuencia en retiro."],
+                ["Simulaciones", inputs.get("n_paths"), "Cantidad de caminos Monte Carlo."],
+            ],
+            columns=["Input", "Valor", "Explicación"],
+        )
+        r = write_table(ws, inputs_df, 4, title="1. Inputs principales")
+        ws.write(r, 0, "Nota", fmt_header)
+        ws.merge_range(r, 1, r, 8, "El retiro que ingresas se interpreta como poder de compra de hoy. Si está indexado, la app lo lleva a pesos nominales de la edad de retiro y lo sigue indexando hasta los 90.", fmt_note)
+        r += 3
+        sr_df = safe_df(saving_ranges_df)
+        if not sr_df.empty:
+            r = write_table(ws, sr_df, r, title="2. Ahorro por edad ingresado", money_cols={"ahorro_esperado_clp"}, int_cols={"edad_inicio", "edad_fin"})
+        if afp_info:
+            afp_df = pd.DataFrame([afp_info])
+            r = write_table(ws, afp_df, r, title="3. AFP calculada", money_cols={c for c in afp_df.columns if "clp" in c.lower()})
+        rec_df = safe_df(recurring_df)
+        if not rec_df.empty:
+            r = write_table(ws, rec_df, r, title="4. Ingresos / gastos recurrentes", money_cols={"monto_mensual_clp"}, int_cols={"edad_inicio", "edad_fin"})
+        lump_in = safe_df(lump_df)
+        if not lump_in.empty:
+            r = write_table(ws, lump_in, r, title="5. Eventos únicos", money_cols={"monto_clp"}, int_cols={"edad_evento"})
+
+        # ----------------------------------------------------
+        # 02 Flujos
+        # ----------------------------------------------------
+        ws = add_sheet("02 Flujos")
+        write_title(ws, "Tabla de flujos", "Resume cuánta plata entra y sale por edad. Las cifras se muestran en CLP nominales de cada año/edad.")
+        ws.set_column("A:A", 14)
+        ws.set_column("B:H", 22)
+        flows = make_monthly_cashflow_table(result)
+        flows_by_age = flows.groupby("año_edad", as_index=False).agg(
+            ahorro_promedio_simulado_clp=("ahorro_promedio_simulado_clp", "sum"),
+            retiro_clp=("retiro_clp", "sum"),
+            flujo_recurrente_neto_clp=("flujo_recurrente_neto_clp", "sum"),
+            flujo_esporadico_clp=("flujo_esporadico_clp", "sum"),
+            flujo_neto_antes_retorno_clp=("flujo_neto_antes_retorno_clp", "sum"),
+        )
+        flows_by_age.rename(columns={"año_edad": "edad"}, inplace=True)
+        r = write_table(
+            ws,
+            flows_by_age,
+            4,
+            title="Flujos anuales por edad",
+            money_cols={"ahorro_promedio_simulado_clp", "retiro_clp", "flujo_recurrente_neto_clp", "flujo_esporadico_clp", "flujo_neto_antes_retorno_clp"},
+            int_cols={"edad"},
+        )
+        # Formato condicional para flujo neto.
+        last_row = 6 + len(flows_by_age)
+        ws.conditional_format(6, 5, last_row, 5, {"type": "cell", "criteria": ">=", "value": 0, "format": fmt_good})
+        ws.conditional_format(6, 5, last_row, 5, {"type": "cell", "criteria": "<", "value": 0, "format": fmt_bad})
+        ws.write(r, 0, "Cómo leer", fmt_header)
+        ws.merge_range(r, 1, r + 1, 8, "Si el flujo neto anual es negativo, el patrimonio invertido debe financiar esa diferencia además del efecto de mercado. Si es positivo, entra más plata de la que sale antes de retorno.", fmt_note)
+
+        # ----------------------------------------------------
+        # 03 FIRE / Coast
+        # ----------------------------------------------------
+        ws = add_sheet("03 FIRE Coast")
+        write_title(ws, "FIRE y Coast FIRE por simulación", "No usa regla 4%. Usa tu retiro mensual deseado, ahorro, AFP, arriendos, eventos, inflación y retornos simulados.")
+        ws.set_column("A:A", 30)
+        ws.set_column("B:B", 24)
+        ws.set_column("C:C", 80)
+        fire_age = "No alcanza" if fire_row is None else int(fire_row["edad_retiro"])
+        fire_capital = np.nan if fire_row is None else float(fire_row["capital_p50_retiro_clp"])
+        fire_success = np.nan if fire_row is None else float(fire_row["prob_exito_pct"]) / 100
+        fire_first_withdrawal = np.nan if fire_row is None else float(fire_row["primer_retiro_nominal_clp"])
+        coast_age = "No alcanza" if coast_row is None else int(coast_row["edad_dejar_ahorrar"])
+        coast_capital = np.nan if coast_row is None else float(coast_row["capital_p50_al_dejar_ahorrar_clp"])
+        coast_success = np.nan if coast_row is None else float(coast_row["prob_exito_pct"]) / 100
+        kpi = pd.DataFrame(
+            [
+                ["Edad FIRE anticipada", fire_age, "Primera edad evaluada donde puedes empezar a retirar y llegar a los 90 con el éxito objetivo."],
+                ["Patrimonio para FIRE", fmt_clp(fire_capital), "Capital mediano esperado justo al comenzar ese FIRE."],
+                ["Éxito FIRE", "N/A" if pd.isna(fire_success) else fmt_pct(fire_success * 100), "Probabilidad simulada de no agotar patrimonio."],
+                ["Primer retiro nominal FIRE", fmt_clp(fire_first_withdrawal), "Retiro mensual nominal al iniciar el FIRE."],
+                ["Edad Coast FIRE", coast_age, "Primera edad donde puedes dejar de ahorrar y aún retirarte a la edad elegida."],
+                ["Patrimonio al Coast FIRE", fmt_clp(coast_capital), "Capital mediano esperado al momento de dejar de ahorrar."],
+                ["Éxito Coast FIRE", "N/A" if pd.isna(coast_success) else fmt_pct(coast_success * 100), "Probabilidad simulada de no agotar patrimonio al retirarte en la edad elegida."],
+            ],
+            columns=["Métrica", "Valor", "Explicación simple"],
+        )
+        r = write_table(ws, kpi, 4, title="Resumen ejecutivo FIRE")
+        # Resaltar visualmente los valores clave.
+        ws.conditional_format(6, 1, 12, 1, {"type": "no_blanks", "format": fmt_card_label})
+        ws.write(r, 0, "Interpretación", fmt_header)
+        ws.merge_range(r, 1, r + 2, 8, "FIRE anticipado responde si puedes jubilar antes de la edad elegida. Coast FIRE responde desde qué edad puedes dejar de ahorrar, dejar invertido el patrimonio, y aun así jubilarte en la edad que elegiste.", fmt_note)
+        r += 4
+        if not fire_scan.empty:
+            fire_display = fire_scan.copy()
+            fire_display["prob_exito"] = fire_display["prob_exito_pct"] / 100
+            r = write_table(
+                ws,
+                fire_display.drop(columns=[c for c in ["prob_exito_pct"] if c in fire_display.columns]),
+                r,
+                title="Detalle FIRE por edad evaluada",
+                money_cols={"capital_p5_retiro_clp", "capital_p50_retiro_clp", "capital_p95_retiro_clp", "patrimonio_p50_90_clp", "primer_retiro_nominal_clp"},
+                pct_cols={"prob_exito"},
+                int_cols={"edad_retiro"},
+            )
+        if not coast_scan.empty:
+            coast_display = coast_scan.copy()
+            coast_display["prob_exito"] = coast_display["prob_exito_pct"] / 100
+            r = write_table(
+                ws,
+                coast_display.drop(columns=[c for c in ["prob_exito_pct"] if c in coast_display.columns]),
+                r,
+                title="Detalle Coast FIRE",
+                money_cols={"capital_p50_al_dejar_ahorrar_clp", "capital_p50_al_fire_clp"},
+                pct_cols={"prob_exito"},
+                int_cols={"edad_dejar_ahorrar", "edad_fire"},
+            )
+
+        # ----------------------------------------------------
+        # 04 Matriz FIRE
+        # ----------------------------------------------------
+        ws = add_sheet("04 Matriz FIRE")
+        write_title(ws, "Matriz FIRE realista", "Cada celda muestra el capital nominal requerido a esa edad solo si tu plan simulado realmente alcanza esa combinación de edad y éxito. Si no alcanza, queda marcado como 'No alcanza'.")
+        ws.set_column("A:A", 18)
+        ws.set_column("B:Z", 18)
+        if not realistic_matrix.empty:
+            matrix = realistic_matrix.copy()
+            matrix.index = [f"{idx:.0f}%" for idx in matrix.index]
+            matrix.insert(0, "Éxito objetivo", matrix.index)
+            r = 4
+            ws.merge_range(r, 0, r, matrix.shape[1] - 1, "Capital nominal requerido CLP", fmt_section)
+            r += 2
+            # Manual para mostrar No alcanza sin romper formatos.
+            for j, col in enumerate(matrix.columns):
+                ws.write(r, j, str(col), fmt_header)
+            for i in range(len(matrix)):
+                for j, col in enumerate(matrix.columns):
+                    val = matrix.iloc[i, j]
+                    if j == 0:
+                        ws.write(r + 1 + i, j, val, fmt_header)
+                    elif pd.notna(val):
+                        ws.write_number(r + 1 + i, j, float(val), fmt_money)
+                    else:
+                        ws.write(r + 1 + i, j, "No alcanza", fmt_bad)
+            if matrix.shape[1] > 1 and len(matrix) > 0:
+                ws.conditional_format(r + 1, 1, r + len(matrix), matrix.shape[1] - 1, {"type": "3_color_scale", "min_color": "#00D1FF", "mid_color": "#8B3DFF", "max_color": "#FF5C7A"})
+            ws.write(r + len(matrix) + 3, 0, "Nota", fmt_header)
+            ws.merge_range(r + len(matrix) + 3, 1, r + len(matrix) + 5, 8, "La matriz está en capital nominal de la edad evaluada. Puede crecer con la edad por inflación acumulada. Para comparar poder adquisitivo entre edades, hay que deflactar a pesos de hoy.", fmt_note)
+        else:
+            ws.write(4, 0, "La matriz FIRE no fue calculada todavía en la app.", fmt_note)
+
+        # ----------------------------------------------------
+        # 05 Percentiles
+        # ----------------------------------------------------
+        ws = add_sheet("05 Percentiles")
+        write_title(ws, "Percentiles de patrimonio por edad", "Evolución anual del patrimonio simulado. P50 es la mediana; P5/P95 muestran escenarios pesimista/optimista.")
+        percentiles = make_numeric_csv_table(tabla)
+        r = write_table(
+            ws,
+            percentiles,
+            4,
+            title="Tabla anual por edad",
+            money_cols={c for c in percentiles.columns if c.endswith("_clp")},
+            int_cols={"edad", "año_simulación"},
+        )
+
+        # Anchos razonables globales.
+        for sheet_name, ws in writer.sheets.items():
+            ws.freeze_panes(4, 0)
+            ws.set_zoom(90)
+
+    output.seek(0)
+    return output.getvalue()
+
+
 # ============================================================
 # App Streamlit
 # ============================================================
@@ -1668,7 +1982,7 @@ with st.form("formulario_simulacion"):
         </div>
         <div class="step-grid">
             <div class="step-card"><strong>1. Base</strong><span>Edad, capital, meta y retiro mensual.</span></div>
-            <div class="step-card"><strong>2. Ahorro</strong><span>Tramos por edad con distribución triangular.</span></div>
+            <div class="step-card"><strong>2. Ahorro</strong><span>Tramos por edad, en pesos de hoy.</span></div>
             <div class="step-card"><strong>3. AFP</strong><span>Pensión real estimada e indexada.</span></div>
             <div class="step-card"><strong>4. Flujos</strong><span>Arriendos, gastos e ingresos mensuales.</span></div>
             <div class="step-card"><strong>5. Eventos</strong><span>Entradas o salidas de una sola vez.</span></div>
@@ -1816,29 +2130,6 @@ with st.form("formulario_simulacion"):
             },
         )
 
-        if saving_ranges_df is not None and not saving_ranges_df.empty:
-            preview_rows = []
-            for _, row in saving_ranges_df.iterrows():
-                expected_clp = parse_clp_value(row.get("ahorro_esperado_clp", 0))
-                if expected_clp <= 0:
-                    continue
-                preview_rows.append(
-                    {
-                        "Descripción": str(row.get("descripcion", "Tramo ahorro")),
-                        "Edad inicio": row.get("edad_inicio", ""),
-                        "Edad fin": row.get("edad_fin", ""),
-                        "Mínimo simulado": fmt_clp(max(expected_clp - SAVING_BAND_CLP, 0)),
-                        "Esperado": fmt_clp(expected_clp),
-                        "Máximo simulado": fmt_clp(expected_clp + SAVING_BAND_CLP),
-                    }
-                )
-            if preview_rows:
-                st.caption("Vista de la banda triangular que usará el motor por cada tramo:")
-                st.dataframe(pd.DataFrame(preview_rows), width="stretch", hide_index=True)
-
-        st.caption(
-            "Cada tramo usa una distribución triangular: ahorro esperado ±$500.000. Si activas indexación, esos montos se reajustan por inflación hasta la edad de retiro."
-        )
         panel_end()
 
     with input_tabs[2]:
@@ -2659,6 +2950,23 @@ with tab6:
         with d3:
             st.download_button("Descargar Coast FIRE", data=csv3, file_name="coast_fire.csv", mime="text/csv")
 
+        excel_fire_report = make_executive_excel_report(
+            result,
+            tabla,
+            st.session_state.get("mc_saving_ranges_df"),
+            st.session_state.get("mc_recurring_df"),
+            st.session_state.get("mc_lump_df"),
+            st.session_state.get("mc_afp_info"),
+            analysis,
+        )
+        st.download_button(
+            "Descargar reporte ejecutivo Excel",
+            data=excel_fire_report,
+            file_name="reporte_fire_cliente.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Excel con inputs, flujos, FIRE, Coast FIRE y matriz realista explicado para cliente.",
+        )
+
         with st.expander("Cómo leer esta sección", expanded=False):
             st.markdown(
                 """
@@ -2712,20 +3020,31 @@ with tab7:
         include_paths=bool(include_paths_export),
     )
 
+    excel_report = make_executive_excel_report(
+        result,
+        tabla,
+        st.session_state.get("mc_saving_ranges_df"),
+        st.session_state.get("mc_recurring_df"),
+        st.session_state.get("mc_lump_df"),
+        st.session_state.get("mc_afp_info"),
+        st.session_state.get("mc_fire_analysis"),
+    )
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
+        st.download_button(
+            "Reporte ejecutivo Excel",
+            data=excel_report,
+            file_name="reporte_fire_cliente.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Excel coloreado y explicativo con inputs, flujos, FIRE, Coast FIRE y matriz realista.",
+        )
+    with c2:
         st.download_button(
             "Descargar ZIP completo",
             data=export_zip,
             file_name="escenario_montecarlo_completo.zip",
             mime="application/zip",
-        )
-    with c2:
-        st.download_button(
-            "Tabla por edad CSV",
-            data=csv_tabla,
-            file_name="tabla_montecarlo_por_edad_clp.csv",
-            mime="text/csv",
         )
     with c3:
         st.download_button(
@@ -2741,6 +3060,13 @@ with tab7:
             file_name="distribucion_final_paths_clp.csv",
             mime="text/csv",
         )
+
+    st.download_button(
+        "Tabla por edad CSV",
+        data=csv_tabla,
+        file_name="tabla_montecarlo_por_edad_clp.csv",
+        mime="text/csv",
+    )
 
     with st.expander("Descargas individuales adicionales", expanded=False):
         c5, c6 = st.columns(2)
