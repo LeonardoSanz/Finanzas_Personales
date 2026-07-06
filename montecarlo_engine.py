@@ -677,7 +677,6 @@ def tabla_monte_carlo_por_edad(result: dict) -> pd.DataFrame:
     return tabla
 
 
-# ============================================================
 # Matriz de capital requerido por edad y probabilidad de éxito
 # ============================================================
 

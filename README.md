@@ -233,14 +233,45 @@ La app sigue siendo avanzada, pero queda más vendible visualmente y menos satur
 
 ## Matriz de capital requerido
 
-La app incluye un tab **Matriz retiro**. Esta herramienta calcula cuánto capital deberías tener a distintas edades para comenzar a retirar el monto mensual deseado y llegar hasta los 90 años con una probabilidad objetivo de éxito.
+Se agregó el tab **Matriz retiro**.
 
-La lectura es:
+La matriz responde:
 
-- Columnas: edad a la que comienzas a retirar.
-- Filas: probabilidad de éxito objetivo, por ejemplo 80%, 90% o 95%.
-- Celda: capital requerido en esa edad, en CLP.
+> Si comienzo a retirar a cierta edad, ¿cuánto patrimonio debo tener justo en esa fecha para llegar a los 90 años con una probabilidad de éxito objetivo?
 
-La matriz usa los mismos supuestos del escenario actual: retorno, volatilidad, retiro mensual, inflación, AFP, arriendos, egresos recurrentes y eventos únicos futuros. No incluye ahorro antes de esa edad, porque la pregunta es cuánto capital necesitas tener ya acumulado en ese momento.
+Por defecto evalúa estas edades:
 
-El cálculo usa una simulación adicional y una recursión hacia atrás por path: para cada trayectoria de retornos calcula el capital mínimo que habría permitido no agotar el patrimonio hasta los 90. Luego toma el percentil asociado a la probabilidad objetivo.
+- 35
+- 37
+- 40
+- 43
+- 45
+- 48
+- 50
+- 55
+- 60
+- 65
+
+Y estas probabilidades de éxito:
+
+- 70%
+- 80%
+- 90%
+- 95%
+
+La matriz usa los mismos supuestos del escenario activo:
+
+- retiro mensual,
+- indexación por inflación,
+- arriendos,
+- AFP,
+- flujos recurrentes,
+- eventos únicos,
+- modelo de retorno,
+- retorno esperado,
+- volatilidad,
+- truncamiento.
+
+Importante: este cálculo no incluye ahorro antes de la edad analizada. La celda calcula el capital que ya deberías tener acumulado en esa edad para financiar el retiro desde ahí hasta los 90.
+
+La matriz puede descargarse como CSV y también queda incluida en el ZIP completo del escenario si ya fue calculada antes de exportar.

@@ -1065,7 +1065,6 @@ def plot_ruin_distribution(result: dict) -> go.Figure:
     return apply_plot_theme(fig, y_currency=False, x_currency=False)
 
 
-
 def parse_int_list(text: str, *, min_value: int, max_value: int) -> tuple[int, ...]:
     """Parsea una lista tipo '40, 45, 50' y la deja ordenada/sin duplicados."""
     values: list[int] = []
@@ -1140,6 +1139,7 @@ def plot_required_capital_heatmap(matrix_clp: pd.DataFrame) -> go.Figure:
         separators=",.",
     )
     return apply_plot_theme(fig, y_currency=False, x_currency=False)
+
 
 
 def make_display_table(tabla: pd.DataFrame) -> pd.DataFrame:
@@ -1285,9 +1285,9 @@ def make_export_zip(
         if afp_info is not None:
             write_csv("09_afp_calculada.csv", pd.DataFrame([afp_info]))
         if retirement_matrix is not None:
-            write_csv("10_matriz_capital_requerido_clp.csv", retirement_matrix["matrix_clp"].reset_index())
-            write_csv("11_matriz_capital_requerido_largo.csv", retirement_matrix["long"].copy())
-            write_csv("12_matriz_capital_requerido_percentiles.csv", retirement_matrix["distribution_by_age"].copy())
+            write_csv("10_matriz_capital_requerido_largo.csv", retirement_matrix["long"].copy())
+            zf.writestr("11_matriz_capital_requerido_clp.csv", retirement_matrix["matrix_clp"].reset_index().to_csv(index=False).encode("utf-8-sig"))
+            write_csv("12_matriz_capital_requerido_distribucion.csv", retirement_matrix["distribution_by_age"].copy())
 
         if include_paths:
             paths_clp = np.round(result["paths_mm"].astype(float) * 1_000_000, 0)
@@ -1295,7 +1295,7 @@ def make_export_zip(
             cols = [f"edad_{edad_inicial + i / 12:.2f}" for i in range(paths_clp.shape[1])]
             paths_df = pd.DataFrame(paths_clp, columns=cols)
             paths_df.insert(0, "path_id", np.arange(1, paths_clp.shape[0] + 1))
-            write_csv("20_paths_completos_clp.csv", paths_df)
+            write_csv("13_paths_completos_clp.csv", paths_df)
 
     return buffer.getvalue()
 
@@ -1631,7 +1631,6 @@ def parse_lump_events(df: pd.DataFrame, edad_inicial_: int, edad_final_: int) ->
     return tuple(events)
 
 
-
 def parse_lump_age_events(df: pd.DataFrame, edad_inicial_: int, edad_final_: int) -> tuple[tuple[float, float], ...]:
     """Convierte eventos únicos a edades absolutas para la matriz de retiro."""
     events: list[tuple[float, float]] = []
@@ -1647,6 +1646,7 @@ def parse_lump_age_events(df: pd.DataFrame, edad_inicial_: int, edad_final_: int
         sign = 1.0 if str(row.get("tipo", "Ingreso")) == "Ingreso" else -1.0
         events.append((age, sign * clp_to_mm(amount_clp)))
     return tuple(events)
+
 
 
 def parse_recurring_events(df: pd.DataFrame, edad_inicial_: int, edad_final_: int) -> tuple[tuple, ...]:
@@ -2055,7 +2055,7 @@ with tab6:
     )
     st.info(
         "La matriz usa los mismos supuestos de retorno, retiro mensual, inflación, AFP, arriendos y eventos únicos del escenario actual. "
-        "No incluye ahorro antes de esa edad: precisamente calcula el capital que ya deberías tener acumulado en ese momento."
+        "No incluye ahorro antes de esa edad: calcula el capital que ya deberías tener acumulado en ese momento."
     )
 
     mx1, mx2, mx3 = st.columns([2, 2, 1])
