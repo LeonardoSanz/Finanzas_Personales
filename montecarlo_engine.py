@@ -142,6 +142,7 @@ def monte_carlo_accumulation_withdrawal_mm(
     return_model: Literal["annual_smooth", "monthly_iid"] = "annual_smooth",
     withdrawal_indexed_to_inflation: bool = False,
     inflation_annual: float = 0.0,
+    withdrawal_index_base_age: Optional[float] = None,
 ) -> dict:
     """
     Simula patrimonio en MM CLP con dos fases:
@@ -378,8 +379,13 @@ def monte_carlo_accumulation_withdrawal_mm(
     withdrawal_schedule = np.zeros(months, dtype=np.float64)
     if retirement_start_month < months and withdrawal_monthly_mm > 0:
         if withdrawal_indexed_to_inflation:
+            # El monto ingresado se interpreta como pesos de hoy / poder de compra actual.
+            # Por eso el primer retiro a edad_inicio_retiro ya viene inflado desde edad_inicial
+            # hasta esa edad, y luego sigue indexándose hasta los 90.
             monthly_inflation = (1 + inflation_annual) ** (1 / 12) - 1
-            k = np.arange(months - retirement_start_month)
+            base_age = float(edad_inicial if withdrawal_index_base_age is None else withdrawal_index_base_age)
+            base_month = int(round((base_age - float(edad_inicial)) * 12))
+            k = np.arange(retirement_start_month, months, dtype=np.float64) - float(base_month)
             withdrawal_schedule[retirement_start_month:] = withdrawal_monthly_mm * (1 + monthly_inflation) ** k
         else:
             withdrawal_schedule[retirement_start_month:] = withdrawal_monthly_mm
@@ -554,6 +560,7 @@ def monte_carlo_accumulation_withdrawal_mm(
             "return_model": return_model,
             "withdrawal_indexed_to_inflation": withdrawal_indexed_to_inflation,
             "inflation_annual": inflation_annual,
+            "withdrawal_index_base_age": float(edad_inicial if withdrawal_index_base_age is None else withdrawal_index_base_age),
             "path_memory_mb": path_memory_mb,
         },
         "summary": final_summary,
@@ -688,6 +695,7 @@ def _build_retirement_cashflow_schedule_mm(
     withdrawal_timing: Literal["begin", "end"] = "end",
     withdrawal_indexed_to_inflation: bool = False,
     inflation_annual: float = 0.0,
+    withdrawal_index_base_age: Optional[float] = None,
     recurring_monthly_events: Optional[tuple[tuple, ...]] = None,
     lump_sum_age_events: Optional[tuple[tuple[float, float], ...]] = None,
 ) -> dict:
@@ -712,7 +720,10 @@ def _build_retirement_cashflow_schedule_mm(
     withdrawal_schedule = np.zeros(months, dtype=np.float64)
     if withdrawal_monthly_mm > 0:
         if withdrawal_indexed_to_inflation:
-            k = np.arange(months, dtype=np.float64)
+            # Monto deseado expresado en pesos de hoy. Para una edad de retiro X,
+            # el primer retiro nominal debe llevar inflación desde la edad base hasta X.
+            base_age = float(edad_inicio if withdrawal_index_base_age is None else withdrawal_index_base_age)
+            k = np.arange(months, dtype=np.float64) + (float(edad_inicio) - base_age) * 12
             withdrawal_schedule[:] = float(withdrawal_monthly_mm) * (1 + monthly_inflation) ** k
         else:
             withdrawal_schedule[:] = float(withdrawal_monthly_mm)
@@ -891,6 +902,7 @@ def required_capital_matrix_mm(
     return_model: Literal["annual_smooth", "monthly_iid"] = "monthly_iid",
     withdrawal_indexed_to_inflation: bool = False,
     inflation_annual: float = 0.0,
+    withdrawal_index_base_age: Optional[float] = None,
 ) -> dict:
     """Calcula matriz de capital requerido para jubilar a distintas edades.
 
@@ -928,6 +940,7 @@ def required_capital_matrix_mm(
             withdrawal_timing=withdrawal_timing,
             withdrawal_indexed_to_inflation=withdrawal_indexed_to_inflation,
             inflation_annual=inflation_annual,
+            withdrawal_index_base_age=withdrawal_index_base_age,
             recurring_monthly_events=recurring_monthly_events,
             lump_sum_age_events=lump_sum_age_events,
         )
@@ -1003,6 +1016,7 @@ def required_capital_matrix_mm(
             "withdrawal_monthly_mm": withdrawal_monthly_mm,
             "withdrawal_indexed_to_inflation": withdrawal_indexed_to_inflation,
             "inflation_annual": inflation_annual,
+            "withdrawal_index_base_age": withdrawal_index_base_age,
             "seed": seed,
         },
     }

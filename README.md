@@ -275,3 +275,19 @@ La matriz usa los mismos supuestos del escenario activo:
 Importante: este cálculo no incluye ahorro antes de la edad analizada. La celda calcula el capital que ya deberías tener acumulado en esa edad para financiar el retiro desde ahí hasta los 90.
 
 La matriz puede descargarse como CSV y también queda incluida en el ZIP completo del escenario si ya fue calculada antes de exportar.
+
+## Corrección importante de indexación
+
+El retiro mensual fijo se interpreta como **dinero de hoy**. Si ingresas `$5.000.000` e indexas a 3%, el primer retiro nominal en la edad de retiro ya se calcula ajustando inflación desde la edad inicial hasta esa edad. Luego continúa indexándose mes a mes hasta los 90.
+
+## Lectura FIRE
+
+La app muestra una referencia rápida:
+
+- **Costo FIRE mensual real:** retiro deseado en pesos de hoy.
+- **Número FIRE real:** costo anual / tasa FIRE.
+- **Número FIRE nominal al retiro:** número FIRE llevado a pesos nominales de la edad de retiro.
+
+## Matriz de capital requerido
+
+El tab **Matriz retiro** calcula cuánto patrimonio necesitas tener exactamente a cada edad para llegar a los 90 con una probabilidad objetivo. Usa los mismos supuestos del escenario: retiro en pesos de hoy indexado, AFP, arriendos, eventos únicos, inflación y modelo de retornos.

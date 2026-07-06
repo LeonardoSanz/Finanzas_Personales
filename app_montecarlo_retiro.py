@@ -1406,6 +1406,27 @@ with st.form("formulario_simulacion"):
             withdrawal_indexed_to_inflation = st.checkbox("Indexar retiro por inflación", value=True)
         with c8:
             inflation_annual_pct = st.number_input("Inflación anual indexación (%)", min_value=0.0, value=3.0, step=0.25)
+
+        f1, f2, f3 = st.columns([1, 1, 2])
+        with f1:
+            fire_withdrawal_rate_pct = st.number_input(
+                "Tasa FIRE anual (%)",
+                min_value=1.0,
+                max_value=10.0,
+                value=3.2,
+                step=0.1,
+                help="Tasa usada para calcular el número FIRE simple: gasto anual real / tasa. Es una referencia, no reemplaza el Monte Carlo.",
+            )
+        with f2:
+            st.markdown(
+                f"""<div class="mini-card"><b>Costo FIRE mensual real</b><span>{fmt_clp(withdrawal_monthly_clp)} en pesos de hoy</span></div>""",
+                unsafe_allow_html=True,
+            )
+        with f3:
+            st.caption(
+                "El retiro que ingresas se interpreta como poder de compra de hoy. "
+                "Si está indexado, la app lo lleva a monto nominal desde hoy hasta la edad de retiro y luego lo sigue indexando hasta los 90."
+            )
         panel_end()
 
     with input_tabs[1]:
@@ -1783,6 +1804,7 @@ if submitted:
                 return_model=return_model,
                 withdrawal_indexed_to_inflation=bool(withdrawal_indexed_to_inflation),
                 inflation_annual=float(inflation_annual_pct) / 100,
+                withdrawal_index_base_age=float(edad_inicial),
             )
             result["afp_info"] = afp_info
             tabla = tabla_monte_carlo_por_edad(result)
@@ -1796,6 +1818,14 @@ if submitted:
             st.session_state["mc_recurring_events"] = recurring_events
             st.session_state["mc_saving_ranges_df"] = saving_ranges_df
             st.session_state["mc_afp_info"] = afp_info
+            st.session_state["mc_fire_info"] = {
+                "costo_fire_mensual_real_clp": int(withdrawal_monthly_clp),
+                "costo_fire_anual_real_clp": int(withdrawal_monthly_clp) * 12,
+                "tasa_fire_anual": float(fire_withdrawal_rate_pct) / 100,
+                "numero_fire_real_clp": (int(withdrawal_monthly_clp) * 12) / (float(fire_withdrawal_rate_pct) / 100) if fire_withdrawal_rate_pct > 0 else np.nan,
+                "retiro_indexado": bool(withdrawal_indexed_to_inflation),
+                "inflacion_anual": float(inflation_annual_pct) / 100,
+            }
             st.session_state["mc_export_ready_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             st.session_state.pop("mc_retirement_matrix", None)
     except Exception as exc:
@@ -1918,6 +1948,37 @@ with k12:
         "% donde el patrimonio final supera al patrimonio del inicio del retiro.",
         survival_tone(prob_grow) if not np.isnan(prob_grow) else "primary",
     )
+
+fire_info = st.session_state.get("mc_fire_info", {})
+if fire_info:
+    fire_rate = float(fire_info.get("tasa_fire_anual", 0.032))
+    fire_real = float(fire_info.get("numero_fire_real_clp", np.nan))
+    retirement_month = int(result["inputs"].get("retirement_start_month", 0))
+    infl_m = (1 + float(result["inputs"].get("inflation_annual", 0.0))) ** (1 / 12) - 1
+    fire_nominal_retiro = fire_real * ((1 + infl_m) ** retirement_month) if fire_info.get("retiro_indexado") and not np.isnan(fire_real) else fire_real
+    st.write("")
+    f_k1, f_k2, f_k3 = st.columns(3)
+    with f_k1:
+        metric_card(
+            "Costo FIRE mensual",
+            fmt_clp(fire_info.get("costo_fire_mensual_real_clp", 0)),
+            "Monto mensual deseado expresado en pesos de hoy.",
+            "primary",
+        )
+    with f_k2:
+        metric_card(
+            "Número FIRE real",
+            fmt_clp(fire_real),
+            f"Costo anual / tasa FIRE {fmt_pct(fire_rate * 100)}. Referencia simple en pesos de hoy.",
+            "cyan",
+        )
+    with f_k3:
+        metric_card(
+            "Número FIRE nominal al retiro",
+            fmt_clp(fire_nominal_retiro),
+            "Referencia FIRE llevada a pesos nominales de la edad de retiro si el retiro está indexado.",
+            "orange",
+        )
 
 st.caption(
     f"Media efectiva anual simulada: {result['inputs']['effective_truncated_mean_annualized'] * 100:,.2f}%. "
@@ -2122,6 +2183,7 @@ with tab6:
                     return_model=str(result["inputs"].get("return_model", "monthly_iid")),
                     withdrawal_indexed_to_inflation=bool(result["inputs"].get("withdrawal_indexed_to_inflation", False)),
                     inflation_annual=float(result["inputs"].get("inflation_annual", 0.0)),
+                    withdrawal_index_base_age=float(result["inputs"].get("withdrawal_index_base_age", result["inputs"].get("edad_inicial"))),
                 )
                 st.session_state["mc_retirement_matrix"] = retirement_matrix
                 st.success("Matriz calculada.")
