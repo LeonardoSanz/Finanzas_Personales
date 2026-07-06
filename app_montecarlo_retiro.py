@@ -1681,7 +1681,7 @@ with st.form("formulario_simulacion"):
 
     input_tabs = st.tabs([
         "1. Base",
-        "2. Ahorro mensual",
+        "2. Ahorro por edad",
         "3. AFP",
         "4. Ingresos / gastos",
         "5. Eventos únicos",
@@ -1743,63 +1743,101 @@ with st.form("formulario_simulacion"):
 
     with input_tabs[1]:
         panel_start(
-            "Ahorro mensual antes del retiro",
-            "Usa un único monto esperado de ahorro mensual. La simulación aplica una variación fija de ±$500.000 alrededor de ese monto y desde la edad de retiro el ahorro queda automáticamente en cero.",
+            "Ahorro mensual por edad",
+            "Define tramos de ahorro antes del retiro. En cada tramo ingresas el ahorro esperado en pesos de hoy; la simulación aplica automáticamente una banda triangular de ±$500.000 y desde la edad de retiro el ahorro queda en cero.",
         )
-        t1, t2, t3 = st.columns([1.4, 1, 1])
+        t1, t2 = st.columns([1, 1])
         with t1:
-            monthly_saving_clp = money_text_input(
-                "Ahorro mensual esperado CLP",
-                3_000_000,
-                key="monthly_saving_expected_clp_text",
-                help="Monto central de ahorro mensual en pesos de hoy. Ej: 3.000.000.",
-            )
-        with t2:
             contribution_timing_es = st.selectbox("Timing ahorro", ["Fin de mes", "Inicio de mes"], index=0)
-        with t3:
+        with t2:
             savings_indexed_to_inflation = st.checkbox(
                 "Indexar ahorro por inflación",
                 value=True,
-                help="Si está activo, el ahorro se interpreta como pesos de hoy y sube con inflación hasta el retiro.",
+                help="Si está activo, cada monto de ahorro se interpreta como pesos de hoy y sube con inflación hasta el retiro.",
             )
 
         SAVING_BAND_CLP = 500_000
-        saving_min_clp = max(int(monthly_saving_clp) - SAVING_BAND_CLP, 0)
-        saving_mode_clp = max(int(monthly_saving_clp), 0)
-        saving_max_clp = max(int(monthly_saving_clp) + SAVING_BAND_CLP, 0)
+        first_cut_age = min(35, int(edad_inicio_retiro))
+        default_saving_rows = []
+        if int(edad_inicial) < first_cut_age:
+            default_saving_rows.append(
+                {
+                    "descripcion": "Hasta 35",
+                    "edad_inicio": int(edad_inicial),
+                    "edad_fin": int(first_cut_age),
+                    "ahorro_esperado_clp": "3.000.000",
+                }
+            )
+        if int(edad_inicio_retiro) > first_cut_age:
+            default_saving_rows.append(
+                {
+                    "descripcion": "35 a retiro",
+                    "edad_inicio": int(first_cut_age),
+                    "edad_fin": int(edad_inicio_retiro),
+                    "ahorro_esperado_clp": "2.000.000",
+                }
+            )
+        if not default_saving_rows:
+            default_saving_rows.append(
+                {
+                    "descripcion": "Ahorro hasta retiro",
+                    "edad_inicio": int(edad_inicial),
+                    "edad_fin": int(edad_inicio_retiro),
+                    "ahorro_esperado_clp": "3.000.000",
+                }
+            )
 
-        s1, s2, s3 = st.columns(3)
-        with s1:
-            st.markdown(
-                f"""<div class="mini-card"><b>Ahorro mínimo simulado</b><span>{fmt_clp(saving_min_clp)}</span></div>""",
-                unsafe_allow_html=True,
-            )
-        with s2:
-            st.markdown(
-                f"""<div class="mini-card"><b>Ahorro esperado</b><span>{fmt_clp(saving_mode_clp)}</span></div>""",
-                unsafe_allow_html=True,
-            )
-        with s3:
-            st.markdown(
-                f"""<div class="mini-card"><b>Ahorro máximo simulado</b><span>{fmt_clp(saving_max_clp)}</span></div>""",
-                unsafe_allow_html=True,
-            )
-
-        st.caption(
-            "La banda ±$500.000 se aplica todos los meses. El motor usa distribución triangular entre mínimo, esperado y máximo; si activas indexación, todos esos montos se reajustan con inflación hasta la edad de retiro."
+        saving_ranges_input_df = pd.DataFrame(default_saving_rows)
+        saving_ranges_df = st.data_editor(
+            saving_ranges_input_df,
+            width="stretch",
+            num_rows="dynamic",
+            hide_index=True,
+            key="saving_ranges_editor",
+            column_config={
+                "descripcion": st.column_config.TextColumn("Descripción"),
+                "edad_inicio": st.column_config.NumberColumn(
+                    "Edad inicio",
+                    min_value=int(edad_inicial),
+                    max_value=EDAD_FINAL_FIJA,
+                    step=1,
+                ),
+                "edad_fin": st.column_config.NumberColumn(
+                    "Edad fin",
+                    min_value=int(edad_inicial),
+                    max_value=EDAD_FINAL_FIJA,
+                    step=1,
+                    help="El motor corta automáticamente el ahorro en la edad de retiro aunque pongas una edad mayor.",
+                ),
+                "ahorro_esperado_clp": st.column_config.TextColumn(
+                    "Ahorro esperado CLP",
+                    help="Ej: 3.000.000. El mínimo/máximo simulado será este monto ±$500.000.",
+                ),
+            },
         )
 
-        saving_ranges_df = pd.DataFrame(
-            [
-                {
-                    "descripcion": "Ahorro mensual único",
-                    "edad_inicio": int(edad_inicial),
-                    "edad_fin": EDAD_FINAL_FIJA,
-                    "ahorro_min_clp": str(saving_min_clp),
-                    "ahorro_probable_clp": str(saving_mode_clp),
-                    "ahorro_max_clp": str(saving_max_clp),
-                }
-            ]
+        if saving_ranges_df is not None and not saving_ranges_df.empty:
+            preview_rows = []
+            for _, row in saving_ranges_df.iterrows():
+                expected_clp = parse_clp_value(row.get("ahorro_esperado_clp", 0))
+                if expected_clp <= 0:
+                    continue
+                preview_rows.append(
+                    {
+                        "Descripción": str(row.get("descripcion", "Tramo ahorro")),
+                        "Edad inicio": row.get("edad_inicio", ""),
+                        "Edad fin": row.get("edad_fin", ""),
+                        "Mínimo simulado": fmt_clp(max(expected_clp - SAVING_BAND_CLP, 0)),
+                        "Esperado": fmt_clp(expected_clp),
+                        "Máximo simulado": fmt_clp(expected_clp + SAVING_BAND_CLP),
+                    }
+                )
+            if preview_rows:
+                st.caption("Vista de la banda triangular que usará el motor por cada tramo:")
+                st.dataframe(pd.DataFrame(preview_rows), width="stretch", hide_index=True)
+
+        st.caption(
+            "Cada tramo usa una distribución triangular: ahorro esperado ±$500.000. Si activas indexación, esos montos se reajustan por inflación hasta la edad de retiro."
         )
         panel_end()
 
@@ -1994,15 +2032,31 @@ def parse_recurring_events(df: pd.DataFrame, edad_inicial_: int, edad_final_: in
 
 
 def parse_saving_ranges(df: pd.DataFrame, edad_inicial_: int, edad_retiro_: int) -> tuple[tuple[float, Optional[float], float, float, float, str], ...]:
-    """Convierte la tabla de tramos de ahorro a MM CLP para el motor."""
+    """Convierte la tabla de tramos de ahorro a MM CLP para el motor.
+
+    Formato actual de UI:
+      - ahorro_esperado_clp: monto central por tramo.
+      - el motor usa una banda automática de ±$500.000.
+
+    También mantiene compatibilidad con versiones antiguas que tenían
+    ahorro_min_clp / ahorro_probable_clp / ahorro_max_clp.
+    """
     ranges: list[tuple[float, Optional[float], float, float, float, str]] = []
     if df is None or df.empty:
         return tuple(ranges)
 
+    saving_band_clp = 500_000
+
     for _, row in df.dropna(subset=["edad_inicio", "edad_fin"]).iterrows():
-        min_clp = parse_clp_value(row.get("ahorro_min_clp", 0))
-        mode_clp = parse_clp_value(row.get("ahorro_probable_clp", 0))
-        max_clp = parse_clp_value(row.get("ahorro_max_clp", 0))
+        if "ahorro_esperado_clp" in df.columns:
+            mode_clp = parse_clp_value(row.get("ahorro_esperado_clp", 0))
+            min_clp = max(mode_clp - saving_band_clp, 0)
+            max_clp = mode_clp + saving_band_clp if mode_clp > 0 else 0
+        else:
+            min_clp = parse_clp_value(row.get("ahorro_min_clp", 0))
+            mode_clp = parse_clp_value(row.get("ahorro_probable_clp", 0))
+            max_clp = parse_clp_value(row.get("ahorro_max_clp", 0))
+
         if min_clp == 0 and mode_clp == 0 and max_clp == 0:
             continue
 

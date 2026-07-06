@@ -10,13 +10,13 @@ La simulación tiene dos fases:
 1. **Acumulación:** capital inicial + ahorro mensual hasta la edad de inicio de retiro.
 2. **Retiro:** desde la edad elegida el ahorro se vuelve cero y se descuenta un retiro fijo mensual.
 
-El ahorro patrimonial se ingresa como un único monto mensual esperado. La app aplica una banda fija de **±$500.000** alrededor de ese monto usando distribución triangular:
+El ahorro patrimonial se ingresa por **tramos de edad**. En cada tramo escribes el ahorro mensual esperado en pesos de hoy; la app aplica una banda fija de **±$500.000** alrededor de ese monto usando distribución triangular:
 
 | Input | Mínimo simulado | Más probable | Máximo simulado |
 |---|---:|---:|---:|
 | $3.000.000 | $2.500.000 | $3.000.000 | $3.500.000 |
 
-Desde la edad de inicio de retiro, el ahorro se corta automáticamente. Si activas indexación, ese ahorro se interpreta como pesos de hoy y sube con inflación hasta el retiro.
+Desde la edad de inicio de retiro, el ahorro se corta automáticamente. Si activas indexación, cada tramo de ahorro se interpreta como pesos de hoy y sube con inflación hasta el retiro.
 
 La edad final está fija en **90 años**.
 
@@ -26,7 +26,7 @@ La edad final está fija en **90 años**.
 - Montos ingresados y mostrados en CLP, no como `MM`, con separadores de miles visibles: `1.000.000.000`.
 - Edad final fija en 90 años.
 - Inputs monetarios como texto para poder escribir `50.000.000`, `$50.000.000` o `50 MM`.
-- Input simple de **ahorro mensual esperado**, con banda automática fija de ±$500.000 e indexación opcional por inflación.
+- Tabla de **ahorro mensual por edad**, con un monto esperado por tramo, banda automática fija de ±$500.000 e indexación opcional por inflación.
 - Bloque para calcular **jubilación AFP estimada** usando saldo actual, ahorro mensual AFP, retorno real y tasa de retiro.
 - Tabla para flujos mensuales recurrentes indexables:
   - arriendos,
@@ -150,7 +150,7 @@ Los flujos esporádicos son eventos únicos. Un ingreso positivo aumenta el patr
 
 ## Mejora estética y defaults personales
 
-- Inputs reordenados en pestañas: Base, Ahorro mensual, AFP, Ingresos/gastos, Eventos únicos y Mercado.
+- Inputs reordenados en pestañas: Base, Ahorro por edad, AFP, Ingresos/gastos, Eventos únicos y Mercado.
 - Se cargan por defecto los supuestos usados como punto de partida:
   - edad inicial 27,
   - retiro desde 42,
@@ -314,3 +314,11 @@ Se mantienen solo cuatro cards principales del escenario:
 
 - Se agregó **indexación del ahorro por inflación**. Los montos de ahorro en los tramos se interpretan como pesos de hoy y, si la casilla está activa, crecen con inflación hasta la edad de retiro. Esto permite modelar sueldos/ahorros reajustados por IPC.
 - Se rediseñó el heatmap de **Matriz FIRE realista** para evitar etiquetas superpuestas. Las celdas viables muestran el capital nominal requerido en formato compacto; las celdas no viables se marcan con `—`.
+
+
+## Último ajuste: ahorro por edad simplificado
+
+- Se recuperó la tabla de ahorro por edad.
+- Cada fila permite definir edad inicio, edad fin y ahorro mensual esperado.
+- El mínimo y máximo ya no se ingresan manualmente: se calculan como ahorro esperado ±$500.000.
+- Si la indexación está activa, los montos de ahorro de cada tramo se interpretan como pesos de hoy y crecen con inflación hasta el retiro.
