@@ -1127,12 +1127,12 @@ def plot_required_capital_heatmap(matrix_clp: pd.DataFrame) -> go.Figure:
                 [0.45, "rgba(139, 61, 255, 0.62)"],
                 [1.0, "rgba(255, 92, 122, 0.84)"],
             ],
-            colorbar={"title": "Capital CLP", "tickprefix": "$", "tickformat": ",.0f"},
+            colorbar={"title": "Capital nominal CLP", "tickprefix": "$", "tickformat": ",.0f"},
             hovertemplate="Edad retiro %{x}<br>Éxito %{y}<br>Capital requerido %{text}<extra></extra>",
         )
     )
     fig.update_layout(
-        title="Matriz de capital requerido para jubilar hasta los 90",
+        title="Matriz nominal de capital requerido para jubilar hasta los 90",
         xaxis_title="Edad a la que comienzas a retirar",
         yaxis_title="Probabilidad de éxito objetivo",
         height=520,
@@ -1407,25 +1407,17 @@ with st.form("formulario_simulacion"):
         with c8:
             inflation_annual_pct = st.number_input("Inflación anual indexación (%)", min_value=0.0, value=3.0, step=0.25)
 
-        f1, f2, f3 = st.columns([1, 1, 2])
+        f1, f2 = st.columns([1, 2])
         with f1:
-            fire_withdrawal_rate_pct = st.number_input(
-                "Tasa FIRE anual (%)",
-                min_value=1.0,
-                max_value=10.0,
-                value=3.2,
-                step=0.1,
-                help="Tasa usada para calcular el número FIRE simple: gasto anual real / tasa. Es una referencia, no reemplaza el Monte Carlo.",
-            )
-        with f2:
             st.markdown(
-                f"""<div class="mini-card"><b>Costo FIRE mensual real</b><span>{fmt_clp(withdrawal_monthly_clp)} en pesos de hoy</span></div>""",
+                f"""<div class="mini-card"><b>Retiro mensual real deseado</b><span>{fmt_clp(withdrawal_monthly_clp)} en pesos de hoy</span></div>""",
                 unsafe_allow_html=True,
             )
-        with f3:
+        with f2:
             st.caption(
                 "El retiro que ingresas se interpreta como poder de compra de hoy. "
-                "Si está indexado, la app lo lleva a monto nominal desde hoy hasta la edad de retiro y luego lo sigue indexando hasta los 90."
+                "Si está indexado, la app lo lleva a monto nominal desde hoy hasta la edad de retiro y luego lo sigue indexando hasta los 90. "
+                "FIRE y Coast FIRE se evalúan por simulación, no con una tasa fija tipo 4%."
             )
         panel_end()
 
@@ -1819,10 +1811,8 @@ if submitted:
             st.session_state["mc_saving_ranges_df"] = saving_ranges_df
             st.session_state["mc_afp_info"] = afp_info
             st.session_state["mc_fire_info"] = {
-                "costo_fire_mensual_real_clp": int(withdrawal_monthly_clp),
-                "costo_fire_anual_real_clp": int(withdrawal_monthly_clp) * 12,
-                "tasa_fire_anual": float(fire_withdrawal_rate_pct) / 100,
-                "numero_fire_real_clp": (int(withdrawal_monthly_clp) * 12) / (float(fire_withdrawal_rate_pct) / 100) if fire_withdrawal_rate_pct > 0 else np.nan,
+                "retiro_mensual_real_clp": int(withdrawal_monthly_clp),
+                "retiro_anual_real_clp": int(withdrawal_monthly_clp) * 12,
                 "retiro_indexado": bool(withdrawal_indexed_to_inflation),
                 "inflacion_anual": float(inflation_annual_pct) / 100,
             }
@@ -1951,33 +1941,33 @@ with k12:
 
 fire_info = st.session_state.get("mc_fire_info", {})
 if fire_info:
-    fire_rate = float(fire_info.get("tasa_fire_anual", 0.032))
-    fire_real = float(fire_info.get("numero_fire_real_clp", np.nan))
     retirement_month = int(result["inputs"].get("retirement_start_month", 0))
-    infl_m = (1 + float(result["inputs"].get("inflation_annual", 0.0))) ** (1 / 12) - 1
-    fire_nominal_retiro = fire_real * ((1 + infl_m) ** retirement_month) if fire_info.get("retiro_indexado") and not np.isnan(fire_real) else fire_real
+    withdrawal_schedule = result.get("withdrawal_schedule_mm")
+    first_withdrawal_nominal_clp = np.nan
+    if withdrawal_schedule is not None and 0 <= retirement_month < len(withdrawal_schedule):
+        first_withdrawal_nominal_clp = float(withdrawal_schedule[retirement_month]) * 1_000_000
     st.write("")
     f_k1, f_k2, f_k3 = st.columns(3)
     with f_k1:
         metric_card(
-            "Costo FIRE mensual",
-            fmt_clp(fire_info.get("costo_fire_mensual_real_clp", 0)),
-            "Monto mensual deseado expresado en pesos de hoy.",
+            "Retiro real deseado",
+            fmt_clp(fire_info.get("retiro_mensual_real_clp", 0)),
+            "Monto mensual ingresado en pesos de hoy.",
             "primary",
         )
     with f_k2:
         metric_card(
-            "Número FIRE real",
-            fmt_clp(fire_real),
-            f"Costo anual / tasa FIRE {fmt_pct(fire_rate * 100)}. Referencia simple en pesos de hoy.",
+            "Primer retiro nominal",
+            fmt_clp(first_withdrawal_nominal_clp),
+            "Monto mensual nominal al inicio del retiro elegido.",
             "cyan",
         )
     with f_k3:
         metric_card(
-            "Número FIRE nominal al retiro",
-            fmt_clp(fire_nominal_retiro),
-            "Referencia FIRE llevada a pesos nominales de la edad de retiro si el retiro está indexado.",
-            "orange",
+            "Éxito escenario elegido",
+            fmt_pct(result.get("prob_no_ruin", np.nan) * 100),
+            "Probabilidad simulada de llegar a los 90 sin agotar patrimonio.",
+            survival_tone(result.get("prob_no_ruin", np.nan) * 100),
         )
 
 st.caption(
@@ -2039,7 +2029,7 @@ with st.expander("Qué significa cada métrica", expanded=False):
 # ============================================================
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-    ["Percentiles", "Flujos", "Paths", "Distribución final", "Agotamiento", "Matriz retiro", "Tablas"]
+    ["Percentiles", "Flujos", "Paths", "Distribución final", "Agotamiento", "FIRE / Coast / Matriz", "Tablas"]
 )
 
 with tab1:
@@ -2108,15 +2098,63 @@ with tab6:
     st.markdown(
         """
         <div class="download-card">
-            <b>Matriz de capital requerido</b><br>
-            <span>La celda responde: si comienzo a retirar a esta edad, ¿cuánto patrimonio necesito tener justo en esa fecha para llegar a los 90 sin agotar capital con X% de éxito?</span>
+            <b>FIRE / Coast FIRE / Matriz nominal</b><br>
+            <span>La matriz muestra el capital nominal que deberías tener justo en la edad de retiro para financiar el retiro real deseado hasta los 90 con X% de éxito.</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.info(
-        "La matriz usa los mismos supuestos de retorno, retiro mensual, inflación, AFP, arriendos y eventos únicos del escenario actual. "
+        "La matriz usa los mismos supuestos de retorno, retiro mensual real, inflación, AFP, arriendos y eventos únicos del escenario actual. "
+        "Las celdas son montos nominales a cada edad de retiro; por eso pueden subir con la edad aunque en pesos de hoy el capital económico requerido baje. "
         "No incluye ahorro antes de esa edad: calcula el capital que ya deberías tener acumulado en ese momento."
+    )
+
+    retirement_month_tab = int(result["inputs"].get("retirement_start_month", 0))
+    withdrawal_schedule_tab = result.get("withdrawal_schedule_mm")
+    first_withdrawal_nominal_tab = np.nan
+    if withdrawal_schedule_tab is not None and 0 <= retirement_month_tab < len(withdrawal_schedule_tab):
+        first_withdrawal_nominal_tab = float(withdrawal_schedule_tab[retirement_month_tab]) * 1_000_000
+    median_capital_at_selected_retirement = float(np.percentile(result["wealth_at_retirement_mm"], 50)) * 1_000_000
+
+    fire_cols = st.columns(4)
+    with fire_cols[0]:
+        metric_card(
+            "FIRE elegido",
+            f"{int(result['inputs']['edad_inicio_retiro'])} años",
+            "Edad de retiro cargada en el escenario principal.",
+            "primary",
+        )
+    with fire_cols[1]:
+        metric_card(
+            "Éxito simulado",
+            fmt_pct(result.get("prob_no_ruin", np.nan) * 100),
+            "Probabilidad de llegar a los 90 sin agotar patrimonio.",
+            survival_tone(result.get("prob_no_ruin", np.nan) * 100),
+        )
+    with fire_cols[2]:
+        metric_card(
+            "Capital mediano al FIRE",
+            fmt_clp(median_capital_at_selected_retirement),
+            "P50 del patrimonio justo al inicio del retiro elegido.",
+            "cyan",
+        )
+    with fire_cols[3]:
+        metric_card(
+            "Primer retiro nominal",
+            fmt_clp(first_withdrawal_nominal_tab),
+            "Retiro mensual de inicio, llevado desde plata de hoy a pesos de esa edad.",
+            "orange",
+        )
+
+    st.markdown(
+        """
+        <div class="definition-card">
+            <b>Coast FIRE / Cost FIRE</b><br>
+            <span>La lectura de Coast FIRE se hace comparando cuánto tendrías al dejar de ahorrar versus el capital nominal requerido de la matriz. En esta versión, la matriz queda como el insumo central: muestra el capital necesario a cada edad de retiro para diferentes probabilidades de éxito.</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     mx1, mx2, mx3 = st.columns([2, 2, 1])
@@ -2194,7 +2232,7 @@ with tab6:
     else:
         matrix_clp = retirement_matrix["matrix_clp"]
         st.plotly_chart(plot_required_capital_heatmap(matrix_clp), width="stretch")
-        st.write("Matriz en CLP")
+        st.write("Matriz nominal en CLP a la edad de retiro")
         st.dataframe(format_required_matrix_clp(matrix_clp), width="stretch")
 
         long_csv = retirement_matrix["long"].to_csv(index=False).encode("utf-8-sig")
@@ -2220,8 +2258,9 @@ with tab6:
                 """
                 - **Columnas:** edad a la que empiezas el retiro.
                 - **Filas:** probabilidad de éxito objetivo.
-                - **Celda:** capital requerido en esa edad para llegar a los 90 sin agotar patrimonio.
-                - Si la celda de **Edad 42 / 90%** dice `$X`, significa que, bajo estos supuestos, necesitarías tener aproximadamente `$X` a los 42 para que 90% de los paths sobreviva hasta los 90.
+                - **Celda:** capital nominal requerido en esa edad para llegar a los 90 sin agotar patrimonio.
+                - Si la celda de **Edad 42 / 90%** dice `$X`, significa que, bajo estos supuestos, necesitarías tener aproximadamente `$X` nominales a los 42 para que 90% de los paths sobreviva hasta los 90.
+                - El retiro mensual ingresado se interpreta como plata de hoy; si está indexado, se lleva a pesos nominales al momento de retiro.
                 """
             )
 

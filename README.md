@@ -280,14 +280,19 @@ La matriz puede descargarse como CSV y también queda incluida en el ZIP complet
 
 El retiro mensual fijo se interpreta como **dinero de hoy**. Si ingresas `$5.000.000` e indexas a 3%, el primer retiro nominal en la edad de retiro ya se calcula ajustando inflación desde la edad inicial hasta esa edad. Luego continúa indexándose mes a mes hasta los 90.
 
-## Lectura FIRE
+## Lectura FIRE / Coast FIRE
 
-La app muestra una referencia rápida:
+La app ya no usa una tasa fija tipo 4% o 3,2% para calcular el FIRE patrimonial. El input central es el **retiro mensual deseado en pesos de hoy**. La app muestra:
 
-- **Costo FIRE mensual real:** retiro deseado en pesos de hoy.
-- **Número FIRE real:** costo anual / tasa FIRE.
-- **Número FIRE nominal al retiro:** número FIRE llevado a pesos nominales de la edad de retiro.
+- **Retiro real deseado:** monto mensual ingresado en dinero de hoy.
+- **Primer retiro nominal:** monto mensual ajustado por inflación a la edad de retiro seleccionada.
+- **Éxito simulado:** probabilidad de llegar a los 90 sin agotar patrimonio bajo el escenario activo.
+- **Capital mediano al FIRE elegido:** patrimonio P50 justo al inicio del retiro elegido.
 
-## Matriz de capital requerido
+La tasa de retiro se mantiene solamente para la AFP, porque sirve para transformar el saldo AFP estimado en una pensión mensual aproximada.
 
-El tab **Matriz retiro** calcula cuánto patrimonio necesitas tener exactamente a cada edad para llegar a los 90 con una probabilidad objetivo. Usa los mismos supuestos del escenario: retiro en pesos de hoy indexado, AFP, arriendos, eventos únicos, inflación y modelo de retornos.
+## Matriz nominal de capital requerido
+
+El tab **FIRE / Coast / Matriz** calcula cuánto patrimonio nominal necesitas tener exactamente a cada edad para llegar a los 90 con una probabilidad objetivo. Usa los mismos supuestos del escenario: retiro en pesos de hoy indexado, AFP, arriendos, eventos únicos, inflación y modelo de retornos.
+
+La matriz principal queda en **capital nominal CLP a la edad de retiro**. Esto significa que el número puede subir con la edad por inflación acumulada, aunque en poder adquisitivo de hoy el capital económico requerido pueda ser menor.
