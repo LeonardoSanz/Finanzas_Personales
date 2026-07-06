@@ -233,7 +233,7 @@ La app sigue siendo avanzada, pero queda más vendible visualmente y menos satur
 
 ## Matriz de capital requerido
 
-Se agregó el tab **Matriz retiro**.
+La matriz vive dentro del tab **FIRE / Coast / Matriz**.
 
 La matriz responde:
 
@@ -296,3 +296,22 @@ La tasa de retiro se mantiene solamente para la AFP, porque sirve para transform
 El tab **FIRE / Coast / Matriz** calcula cuánto patrimonio nominal necesitas tener exactamente a cada edad para llegar a los 90 con una probabilidad objetivo. Usa los mismos supuestos del escenario: retiro en pesos de hoy indexado, AFP, arriendos, eventos únicos, inflación y modelo de retornos.
 
 La matriz principal queda en **capital nominal CLP a la edad de retiro**. Esto significa que el número puede subir con la edad por inflación acumulada, aunque en poder adquisitivo de hoy el capital económico requerido pueda ser menor.
+
+## Actualización FIRE realista
+
+La sección **FIRE / Coast / Matriz** ahora responde la pregunta operacional:
+
+> ¿Cuál es la edad mínima a la que puedo retirarme con el monto mensual deseado y llegar a los 90 con X% de éxito?
+
+El cálculo se hace por simulación para cada edad evaluada. Para cada edad, la app acumula patrimonio hasta esa edad usando los tramos de ahorro, retornos, flujos recurrentes, AFP y eventos únicos. Luego corta el ahorro, aplica el retiro mensual deseado —en pesos de hoy e indexado si corresponde— y mide si el patrimonio sobrevive hasta los 90.
+
+La matriz ahora es **realista**: muestra el capital nominal requerido solo cuando el escenario completo logra el porcentaje de éxito de la fila. Si con los supuestos actuales no se llega a esa condición, la celda muestra **No alcanza**.
+
+También se agregó **Coast FIRE / Cost FIRE** por simulación, pero responde una pregunta distinta al FIRE anticipado: usa la **edad de retiro elegida en el escenario base** y busca la primera edad en que podrías dejar de ahorrar, mantener el patrimonio invertido, y aun así jubilarte en esa edad elegida con el porcentaje de éxito objetivo.
+
+Se mantienen solo cuatro cards principales del escenario:
+
+- Patrimonio mediano al iniciar retiro.
+- Patrimonio mediano a los 90.
+- Probabilidad de no agotar patrimonio.
+- Si falla, edad mediana de agotamiento.

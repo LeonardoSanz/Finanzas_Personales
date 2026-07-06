@@ -1141,6 +1141,265 @@ def plot_required_capital_heatmap(matrix_clp: pd.DataFrame) -> go.Figure:
     return apply_plot_theme(fig, y_currency=False, x_currency=False)
 
 
+def cap_saving_ranges_to_age(
+    saving_ranges: tuple | None,
+    stop_age: float,
+) -> tuple:
+    """Recorta los tramos de ahorro para modelar Coast FIRE.
+
+    Hasta stop_age se ahorra según los tramos definidos. Después de stop_age,
+    ahorro = 0, aunque el retiro empiece más adelante.
+    """
+    if not saving_ranges:
+        return tuple()
+    capped = []
+    for item in saving_ranges:
+        if len(item) < 5:
+            continue
+        start_age, end_age, min_mm, mode_mm, max_mm = item[:5]
+        description = item[5] if len(item) >= 6 else "Tramo ahorro"
+        if start_age is None:
+            continue
+        start = float(start_age)
+        end = float(stop_age) if end_age is None or (isinstance(end_age, float) and np.isnan(end_age)) else float(end_age)
+        end = min(end, float(stop_age))
+        if end <= start:
+            continue
+        capped.append((start, end, float(min_mm), float(mode_mm), float(max_mm), str(description)))
+    return tuple(capped)
+
+
+def first_withdrawal_nominal_clp_from_result(sim_result: dict) -> float:
+    """Primer retiro mensual nominal de una simulación."""
+    schedule = sim_result.get("withdrawal_schedule_mm")
+    if schedule is None or len(schedule) == 0:
+        return np.nan
+    nonzero = np.asarray(schedule, dtype=float)[np.asarray(schedule, dtype=float) > 0]
+    if len(nonzero) == 0:
+        return np.nan
+    return float(nonzero[0]) * 1_000_000
+
+
+def run_fire_scan(
+    *,
+    base_result: dict,
+    retirement_ages: tuple[int, ...],
+    n_paths: int,
+    saving_ranges: tuple | None,
+    recurring_events: tuple,
+    lump_events_monthly: tuple,
+    seed_offset: int = 9000,
+) -> pd.DataFrame:
+    """Evalúa FIRE realista: acumula hasta cada edad y retira desde esa edad.
+
+    A diferencia de la matriz teórica, aquí sí se considera si con los ahorros,
+    eventos y retornos simulados realmente llegas con patrimonio suficiente a esa edad.
+    """
+    inputs = base_result["inputs"]
+    rows = []
+    for age in retirement_ages:
+        age = int(age)
+        if age < int(inputs["edad_inicial"]) or age >= int(inputs["edad_final"]):
+            continue
+        sim = monte_carlo_accumulation_withdrawal_mm(
+            edad_inicial=int(inputs["edad_inicial"]),
+            edad_final=int(inputs["edad_final"]),
+            edad_inicio_retiro=age,
+            n_paths=int(n_paths),
+            initial_capital_mm=float(inputs["initial_capital_mm"]),
+            annual_return_mean=float(inputs["annual_return_mean_requested"]),
+            annual_return_std=float(inputs["annual_return_std"]),
+            annual_return_low=float(inputs["annual_return_low"]),
+            annual_return_high=float(inputs["annual_return_high"]),
+            monthly_saving_min_mm=0.0,
+            monthly_saving_mode_mm=0.0,
+            monthly_saving_max_mm=0.0,
+            withdrawal_monthly_mm=float(inputs["withdrawal_monthly_mm"]),
+            contribution_timing=str(inputs.get("contribution_timing", "end")),
+            withdrawal_timing=str(inputs.get("withdrawal_timing", "end")),
+            target_mm=float(inputs.get("target_mm")) if inputs.get("target_mm") is not None else None,
+            seed=int(inputs.get("seed", 123)) + int(seed_offset) + age * 17,
+            mean_is_effective=bool(inputs.get("mean_is_effective", True)),
+            lump_sum_events=lump_events_monthly,
+            recurring_monthly_events=recurring_events,
+            saving_ranges=saving_ranges,
+            floor_zero=bool(inputs.get("floor_zero", True)),
+            return_model=str(inputs.get("return_model", "monthly_iid")),
+            withdrawal_indexed_to_inflation=bool(inputs.get("withdrawal_indexed_to_inflation", False)),
+            inflation_annual=float(inputs.get("inflation_annual", 0.0)),
+            withdrawal_index_base_age=float(inputs.get("withdrawal_index_base_age", inputs.get("edad_inicial"))),
+        )
+        w_ret = np.asarray(sim["wealth_at_retirement_mm"], dtype=float)
+        rows.append(
+            {
+                "edad_retiro": age,
+                "prob_exito_pct": float(sim["prob_no_ruin"] * 100),
+                "capital_p5_retiro_clp": float(np.percentile(w_ret, 5) * 1_000_000),
+                "capital_p50_retiro_clp": float(np.percentile(w_ret, 50) * 1_000_000),
+                "capital_p95_retiro_clp": float(np.percentile(w_ret, 95) * 1_000_000),
+                "patrimonio_p50_90_clp": float(np.percentile(sim["final_wealth_mm"], 50) * 1_000_000),
+                "primer_retiro_nominal_clp": first_withdrawal_nominal_clp_from_result(sim),
+                "edad_mediana_agotamiento": sim.get("median_ruin_age", np.nan),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("edad_retiro") if rows else pd.DataFrame()
+
+
+def build_realistic_matrix(
+    required_matrix_clp: pd.DataFrame,
+    fire_scan_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Matriz nominal requerida, pero solo muestra celdas alcanzables con el plan simulado."""
+    if required_matrix_clp is None or required_matrix_clp.empty or fire_scan_df is None or fire_scan_df.empty:
+        return pd.DataFrame()
+    success_by_age = dict(zip(fire_scan_df["edad_retiro"].astype(int), fire_scan_df["prob_exito_pct"].astype(float)))
+    out = required_matrix_clp.copy().astype(float)
+    for prob_pct in out.index:
+        for age in out.columns:
+            achieved = success_by_age.get(int(age), np.nan)
+            if np.isnan(achieved) or achieved + 1e-12 < float(prob_pct):
+                out.loc[prob_pct, age] = np.nan
+    return out
+
+
+def format_realistic_matrix_clp(realistic_matrix_clp: pd.DataFrame, required_matrix_clp: pd.DataFrame | None = None, fire_scan_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Matriz display: muestra capital si es alcanzable; si no, muestra No alcanza."""
+    if realistic_matrix_clp is None or realistic_matrix_clp.empty:
+        return pd.DataFrame()
+    display = realistic_matrix_clp.copy()
+    display.index = [f"{idx:,.0f}%".replace(",", ".") for idx in display.index]
+    display.columns = [f"Edad {int(c)}" for c in display.columns]
+    formatted = display.copy().astype(object)
+    for r in formatted.index:
+        for c in formatted.columns:
+            val = formatted.loc[r, c]
+            formatted.loc[r, c] = fmt_clp(val) if pd.notna(val) else "No alcanza"
+    return formatted
+
+
+def plot_realistic_required_capital_heatmap(realistic_matrix_clp: pd.DataFrame) -> go.Figure:
+    """Heatmap de matriz realista; las celdas no alcanzables quedan vacías."""
+    if realistic_matrix_clp is None or realistic_matrix_clp.empty:
+        fig = go.Figure()
+        fig.update_layout(title="Matriz realista no disponible")
+        return apply_plot_theme(fig, y_currency=False, x_currency=False)
+    z = realistic_matrix_clp.astype(float).values
+    x = [f"{int(c)}" for c in realistic_matrix_clp.columns]
+    y = [f"{idx:,.0f}%".replace(",", ".") for idx in realistic_matrix_clp.index]
+    text = np.empty(z.shape, dtype=object)
+    for i in range(z.shape[0]):
+        for j in range(z.shape[1]):
+            text[i, j] = fmt_clp(z[i, j]) if np.isfinite(z[i, j]) else "No alcanza"
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z,
+            x=x,
+            y=y,
+            text=text,
+            texttemplate="%{text}",
+            textfont={"size": 12, "color": COLOR_TEXT},
+            colorscale=[
+                [0.0, "rgba(0, 209, 255, 0.30)"],
+                [0.45, "rgba(139, 61, 255, 0.62)"],
+                [1.0, "rgba(255, 92, 122, 0.84)"],
+            ],
+            colorbar={"title": "Capital nominal CLP", "tickprefix": "$", "tickformat": ",.0f"},
+            hovertemplate="Edad retiro %{x}<br>Éxito objetivo %{y}<br>%{text}<extra></extra>",
+            hoverongaps=False,
+        )
+    )
+    # Plotly no siempre imprime texto sobre celdas NaN; agregamos anotaciones explícitas.
+    for i, yy in enumerate(y):
+        for j, xx in enumerate(x):
+            if not np.isfinite(z[i, j]):
+                fig.add_annotation(
+                    x=xx,
+                    y=yy,
+                    text="No alcanza",
+                    showarrow=False,
+                    font={"size": 11, "color": COLOR_MUTED},
+                )
+    fig.update_layout(
+        title="Matriz FIRE realista: capital requerido solo donde tu plan alcanza el éxito objetivo",
+        xaxis_title="Edad a la que empiezas a retirar",
+        yaxis_title="Probabilidad de éxito objetivo",
+        height=520,
+        separators=",.",
+    )
+    return apply_plot_theme(fig, y_currency=False, x_currency=False)
+
+
+def find_fire_row(fire_scan_df: pd.DataFrame, target_success_pct: float) -> pd.Series | None:
+    if fire_scan_df is None or fire_scan_df.empty:
+        return None
+    ok = fire_scan_df[fire_scan_df["prob_exito_pct"] >= float(target_success_pct)].sort_values("edad_retiro")
+    if ok.empty:
+        return None
+    return ok.iloc[0]
+
+
+def run_coast_scan(
+    *,
+    base_result: dict,
+    fire_age: int,
+    target_success_pct: float,
+    n_paths: int,
+    saving_ranges: tuple | None,
+    recurring_events: tuple,
+    lump_events_monthly: tuple,
+) -> pd.DataFrame:
+    """Busca la edad mínima en que puedes dejar de ahorrar, manteniendo el retiro en fire_age."""
+    inputs = base_result["inputs"]
+    edad_inicial = int(inputs["edad_inicial"])
+    if fire_age < edad_inicial:
+        return pd.DataFrame()
+    rows = []
+    for coast_age in range(edad_inicial, int(fire_age) + 1):
+        capped_savings = cap_saving_ranges_to_age(saving_ranges, coast_age)
+        sim = monte_carlo_accumulation_withdrawal_mm(
+            edad_inicial=edad_inicial,
+            edad_final=int(inputs["edad_final"]),
+            edad_inicio_retiro=int(fire_age),
+            n_paths=int(n_paths),
+            initial_capital_mm=float(inputs["initial_capital_mm"]),
+            annual_return_mean=float(inputs["annual_return_mean_requested"]),
+            annual_return_std=float(inputs["annual_return_std"]),
+            annual_return_low=float(inputs["annual_return_low"]),
+            annual_return_high=float(inputs["annual_return_high"]),
+            monthly_saving_min_mm=0.0,
+            monthly_saving_mode_mm=0.0,
+            monthly_saving_max_mm=0.0,
+            withdrawal_monthly_mm=float(inputs["withdrawal_monthly_mm"]),
+            contribution_timing=str(inputs.get("contribution_timing", "end")),
+            withdrawal_timing=str(inputs.get("withdrawal_timing", "end")),
+            target_mm=float(inputs.get("target_mm")) if inputs.get("target_mm") is not None else None,
+            seed=int(inputs.get("seed", 123)) + 12000 + coast_age * 19 + int(fire_age) * 23,
+            mean_is_effective=bool(inputs.get("mean_is_effective", True)),
+            lump_sum_events=lump_events_monthly,
+            recurring_monthly_events=recurring_events,
+            saving_ranges=capped_savings,
+            floor_zero=bool(inputs.get("floor_zero", True)),
+            return_model=str(inputs.get("return_model", "monthly_iid")),
+            withdrawal_indexed_to_inflation=bool(inputs.get("withdrawal_indexed_to_inflation", False)),
+            inflation_annual=float(inputs.get("inflation_annual", 0.0)),
+            withdrawal_index_base_age=float(inputs.get("withdrawal_index_base_age", inputs.get("edad_inicial"))),
+        )
+        coast_month = int(round((coast_age - edad_inicial) * 12))
+        coast_month = min(max(coast_month, 0), sim["paths_mm"].shape[1] - 1)
+        coast_wealth = sim["paths_mm"][:, coast_month].astype(float)
+        rows.append(
+            {
+                "edad_dejar_ahorrar": coast_age,
+                "edad_fire": int(fire_age),
+                "prob_exito_pct": float(sim["prob_no_ruin"] * 100),
+                "capital_p50_al_dejar_ahorrar_clp": float(np.percentile(coast_wealth, 50) * 1_000_000),
+                "capital_p50_al_fire_clp": float(np.percentile(sim["wealth_at_retirement_mm"], 50) * 1_000_000),
+                "cumple_objetivo": bool(sim["prob_no_ruin"] * 100 >= float(target_success_pct)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 
 def make_display_table(tabla: pd.DataFrame) -> pd.DataFrame:
     display = tabla.copy()
@@ -1248,6 +1507,7 @@ def make_export_zip(
     lump_df: pd.DataFrame | None,
     afp_info: dict | None,
     retirement_matrix: dict | None = None,
+    fire_analysis: dict | None = None,
     *,
     include_paths: bool = False,
 ) -> bytes:
@@ -1288,6 +1548,13 @@ def make_export_zip(
             write_csv("10_matriz_capital_requerido_largo.csv", retirement_matrix["long"].copy())
             zf.writestr("11_matriz_capital_requerido_clp.csv", retirement_matrix["matrix_clp"].reset_index().to_csv(index=False).encode("utf-8-sig"))
             write_csv("12_matriz_capital_requerido_distribucion.csv", retirement_matrix["distribution_by_age"].copy())
+        if fire_analysis is not None:
+            if isinstance(fire_analysis.get("fire_scan"), pd.DataFrame):
+                write_csv("13_fire_realista_por_edad.csv", fire_analysis["fire_scan"].copy())
+            if isinstance(fire_analysis.get("coast_scan"), pd.DataFrame):
+                write_csv("14_coast_fire.csv", fire_analysis["coast_scan"].copy())
+            if isinstance(fire_analysis.get("realistic_matrix_clp"), pd.DataFrame):
+                zf.writestr("15_matriz_fire_realista_clp.csv", fire_analysis["realistic_matrix_clp"].reset_index().to_csv(index=False).encode("utf-8-sig"))
 
         if include_paths:
             paths_clp = np.round(result["paths_mm"].astype(float) * 1_000_000, 0)
@@ -1818,6 +2085,7 @@ if submitted:
             }
             st.session_state["mc_export_ready_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             st.session_state.pop("mc_retirement_matrix", None)
+            st.session_state.pop("mc_fire_analysis", None)
     except Exception as exc:
         st.error(f"Error en la simulación: {exc}")
         st.stop()
@@ -1847,128 +2115,36 @@ prob_ruin = 100 - prob_no_ruin
 
 st.markdown("### Resultado del escenario")
 
-k1, k2, k3, k4 = st.columns(4)
-with k1:
+# Vista ejecutiva: solo las 4 métricas principales solicitadas.
+kpi_cols = st.columns(4)
+with kpi_cols[0]:
     metric_card(
         "Patrimonio mediano al iniciar retiro",
         fmt_clp_from_mm(ret_p50_mm),
-        f"Edad {result['inputs']['edad_inicio_retiro']}. Es el P50 justo cuando dejas de ahorrar.",
+        "P50 del patrimonio justo cuando se corta el ahorro e inicia el retiro.",
         "primary",
     )
-with k2:
+with kpi_cols[1]:
     metric_card(
         "Patrimonio mediano a los 90",
         fmt_clp_from_mm(final_p50_mm),
-        "P50 final después de retiros, jubilación, arriendos y flujos esporádicos.",
+        "P50 del patrimonio al final del horizonte de simulación.",
         "cyan",
     )
-with k3:
+with kpi_cols[2]:
     metric_card(
         "Probabilidad de no agotar patrimonio",
         fmt_pct(prob_no_ruin),
-        "Porcentaje de simulaciones que nunca llegan a cero antes de los 90.",
+        "Porcentaje de simulaciones que llegan a los 90 sin caer a cero.",
         survival_tone(prob_no_ruin),
     )
-with k4:
-    metric_card(
-        "Probabilidad de quiebre",
-        fmt_pct(prob_ruin),
-        "Complemento de la probabilidad de no agotarse.",
-        "bad" if prob_ruin > 20 else "warn" if prob_ruin > 5 else "good",
-    )
-
-st.write("")
-k5, k6, k7, k8 = st.columns(4)
-with k5:
-    metric_card(
-        "Llegar a la meta al iniciar retiro",
-        fmt_pct(prob_target_ret),
-        f"Meta: {fmt_clp(target_clp)} justo al cortar el ahorro.",
-        "primary",
-    )
-with k6:
-    metric_card(
-        "Terminar sobre la meta a los 90",
-        fmt_pct(prob_target_final),
-        f"Meta: {fmt_clp(target_clp)} después de toda la etapa de retiro.",
-        "cyan",
-    )
-with k7:
-    metric_card(
-        "Gasto bruto de retiro hasta los 90",
-        fmt_clp_from_mm(result["total_withdrawal_requested_mm"]),
-        "Suma de todos los retiros mensuales programados, sin descontar jubilación ni arriendos.",
-        "orange",
-    )
-with k8:
+with kpi_cols[3]:
     metric_card(
         "Si falla, edad mediana de agotamiento",
         "No se agota" if np.isnan(median_ruin_age) else f"{median_ruin_age:,.1f} años".replace(".", ","),
         "Solo mira las simulaciones que sí llegan a cero; no es la edad esperada de todos los escenarios.",
         "good" if np.isnan(median_ruin_age) else "bad",
     )
-
-st.write("")
-k9, k10, k11, k12 = st.columns(4)
-with k9:
-    metric_card(
-        "Ingresos recurrentes externos hasta los 90",
-        fmt_clp_from_mm(result["total_recurring_inflows_mm"]),
-        "Jubilación, arriendos u otros ingresos mensuales cargados en la tabla.",
-        "good",
-    )
-with k10:
-    metric_card(
-        "Egresos recurrentes externos hasta los 90",
-        fmt_clp_from_mm(result["total_recurring_outflows_mm"]),
-        "Costos mensuales extra si agregaste egresos recurrentes.",
-        "bad" if result["total_recurring_outflows_mm"] > 0 else "primary",
-    )
-with k11:
-    metric_card(
-        "Necesidad neta financiada con patrimonio",
-        fmt_clp_from_mm(result["total_net_cash_need_mm"]),
-        "Retiro bruto - ingresos recurrentes + egresos recurrentes.",
-        "warn",
-    )
-with k12:
-    metric_card(
-        "Probabilidad de crecer pese al retiro",
-        fmt_pct(prob_grow),
-        "% donde el patrimonio final supera al patrimonio del inicio del retiro.",
-        survival_tone(prob_grow) if not np.isnan(prob_grow) else "primary",
-    )
-
-fire_info = st.session_state.get("mc_fire_info", {})
-if fire_info:
-    retirement_month = int(result["inputs"].get("retirement_start_month", 0))
-    withdrawal_schedule = result.get("withdrawal_schedule_mm")
-    first_withdrawal_nominal_clp = np.nan
-    if withdrawal_schedule is not None and 0 <= retirement_month < len(withdrawal_schedule):
-        first_withdrawal_nominal_clp = float(withdrawal_schedule[retirement_month]) * 1_000_000
-    st.write("")
-    f_k1, f_k2, f_k3 = st.columns(3)
-    with f_k1:
-        metric_card(
-            "Retiro real deseado",
-            fmt_clp(fire_info.get("retiro_mensual_real_clp", 0)),
-            "Monto mensual ingresado en pesos de hoy.",
-            "primary",
-        )
-    with f_k2:
-        metric_card(
-            "Primer retiro nominal",
-            fmt_clp(first_withdrawal_nominal_clp),
-            "Monto mensual nominal al inicio del retiro elegido.",
-            "cyan",
-        )
-    with f_k3:
-        metric_card(
-            "Éxito escenario elegido",
-            fmt_pct(result.get("prob_no_ruin", np.nan) * 100),
-            "Probabilidad simulada de llegar a los 90 sin agotar patrimonio.",
-            survival_tone(result.get("prob_no_ruin", np.nan) * 100),
-        )
 
 st.caption(
     f"Media efectiva anual simulada: {result['inputs']['effective_truncated_mean_annualized'] * 100:,.2f}%. "
@@ -2098,66 +2274,56 @@ with tab6:
     st.markdown(
         """
         <div class="download-card">
-            <b>FIRE / Coast FIRE / Matriz nominal</b><br>
-            <span>La matriz muestra el capital nominal que deberías tener justo en la edad de retiro para financiar el retiro real deseado hasta los 90 con X% de éxito.</span>
+            <b>FIRE anticipado / Coast FIRE / Matriz realista</b><br>
+            <span>Busca por simulación la primera edad en que puedes retirar el monto mensual deseado —expresado en plata de hoy e indexado si corresponde— sin agotar patrimonio hasta los 90.</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.info(
-        "La matriz usa los mismos supuestos de retorno, retiro mensual real, inflación, AFP, arriendos y eventos únicos del escenario actual. "
-        "Las celdas son montos nominales a cada edad de retiro; por eso pueden subir con la edad aunque en pesos de hoy el capital económico requerido baje. "
-        "No incluye ahorro antes de esa edad: calcula el capital que ya deberías tener acumulado en ese momento."
+        "Esta sección no usa tasa FIRE. Usa el retiro mensual que ingresaste, tus tramos de ahorro, AFP, arriendos, inflación, eventos únicos y retornos. "
+        "La matriz muestra capital nominal requerido solo en las edades donde el plan simulado realmente alcanza el éxito objetivo; si no, marca 'No alcanza'."
     )
 
-    retirement_month_tab = int(result["inputs"].get("retirement_start_month", 0))
-    withdrawal_schedule_tab = result.get("withdrawal_schedule_mm")
-    first_withdrawal_nominal_tab = np.nan
-    if withdrawal_schedule_tab is not None and 0 <= retirement_month_tab < len(withdrawal_schedule_tab):
-        first_withdrawal_nominal_tab = float(withdrawal_schedule_tab[retirement_month_tab]) * 1_000_000
-    median_capital_at_selected_retirement = float(np.percentile(result["wealth_at_retirement_mm"], 50)) * 1_000_000
+    current_retirement_age = int(result["inputs"]["edad_inicio_retiro"])
+    current_retirement_month = int(result["inputs"].get("retirement_start_month", 0))
+    current_withdrawal_schedule = result.get("withdrawal_schedule_mm")
+    current_first_withdrawal_nominal = np.nan
+    if current_withdrawal_schedule is not None and 0 <= current_retirement_month < len(current_withdrawal_schedule):
+        current_first_withdrawal_nominal = float(current_withdrawal_schedule[current_retirement_month]) * 1_000_000
+    current_capital_at_retirement = float(np.percentile(result["wealth_at_retirement_mm"], 50)) * 1_000_000
 
-    fire_cols = st.columns(4)
-    with fire_cols[0]:
+    chosen_cols = st.columns(4)
+    with chosen_cols[0]:
         metric_card(
-            "FIRE elegido",
-            f"{int(result['inputs']['edad_inicio_retiro'])} años",
-            "Edad de retiro cargada en el escenario principal.",
+            "Retiro elegido en inputs",
+            f"{current_retirement_age} años",
+            "Este es el escenario principal cargado arriba; abajo buscamos si puede ser antes.",
             "primary",
         )
-    with fire_cols[1]:
+    with chosen_cols[1]:
         metric_card(
-            "Éxito simulado",
+            "Éxito del retiro elegido",
             fmt_pct(result.get("prob_no_ruin", np.nan) * 100),
-            "Probabilidad de llegar a los 90 sin agotar patrimonio.",
+            "Probabilidad de llegar a los 90 sin agotar patrimonio con la edad elegida.",
             survival_tone(result.get("prob_no_ruin", np.nan) * 100),
         )
-    with fire_cols[2]:
+    with chosen_cols[2]:
         metric_card(
-            "Capital mediano al FIRE",
-            fmt_clp(median_capital_at_selected_retirement),
-            "P50 del patrimonio justo al inicio del retiro elegido.",
+            "Capital mediano al retiro elegido",
+            fmt_clp(current_capital_at_retirement),
+            "P50 del patrimonio justo al comenzar el retiro elegido.",
             "cyan",
         )
-    with fire_cols[3]:
+    with chosen_cols[3]:
         metric_card(
             "Primer retiro nominal",
-            fmt_clp(first_withdrawal_nominal_tab),
-            "Retiro mensual de inicio, llevado desde plata de hoy a pesos de esa edad.",
+            fmt_clp(current_first_withdrawal_nominal),
+            "Tu retiro deseado en plata de hoy, llevado a pesos nominales de esa edad.",
             "orange",
         )
 
-    st.markdown(
-        """
-        <div class="definition-card">
-            <b>Coast FIRE / Cost FIRE</b><br>
-            <span>La lectura de Coast FIRE se hace comparando cuánto tendrías al dejar de ahorrar versus el capital nominal requerido de la matriz. En esta versión, la matriz queda como el insumo central: muestra el capital necesario a cada edad de retiro para diferentes probabilidades de éxito.</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    mx1, mx2, mx3 = st.columns([2, 2, 1])
+    mx1, mx2, mx3, mx4 = st.columns([2.2, 1.4, 1.4, 1.2])
     with mx1:
         default_matrix_ages = [35, 37, 40, 43, 45, 48, 50, 55, 60, 65]
         default_ages_text = ", ".join(
@@ -2166,7 +2332,7 @@ with tab6:
             if int(result["inputs"]["edad_inicial"]) <= x < EDAD_FINAL_FIJA
         )
         if not default_ages_text:
-            default_ages_text = str(min(max(int(result["inputs"]["edad_inicio_retiro"]), int(result["inputs"]["edad_inicial"])), EDAD_FINAL_FIJA - 1))
+            default_ages_text = str(min(max(current_retirement_age, int(result["inputs"]["edad_inicial"])), EDAD_FINAL_FIJA - 1))
         matrix_ages_text = st.text_input(
             "Edades a evaluar",
             value=default_ages_text,
@@ -2174,22 +2340,29 @@ with tab6:
         )
     with mx2:
         matrix_probs_text = st.text_input(
-            "Probabilidades de éxito objetivo (%)",
+            "Éxitos objetivo (%)",
             value="70, 80, 90, 95",
-            help="Ejemplo: 80, 90, 95",
+            help="Filas de la matriz y umbrales de FIRE.",
         )
     with mx3:
+        fire_target_success_pct = st.selectbox(
+            "Éxito para FIRE/Coast",
+            options=[70, 80, 90, 95],
+            index=2,
+            help="Umbral usado para encontrar la edad FIRE mínima y la edad Coast FIRE.",
+        )
+    with mx4:
         matrix_n_paths = st.number_input(
-            "Simulaciones matriz",
+            "Simulaciones análisis",
             min_value=2_000,
             max_value=50_000,
             value=10_000,
             step=2_000,
             format="%d",
-            help="La matriz corre una simulación adicional. 10.000 suele ser suficiente para una primera lectura.",
+            help="Corre simulaciones adicionales para cada edad. Si queda lento, baja este número.",
         )
 
-    calc_matrix = st.button("Calcular matriz de capital requerido", type="primary")
+    calc_matrix = st.button("Calcular FIRE / Coast / matriz realista", type="primary")
     if calc_matrix:
         matrix_ages = parse_int_list(
             matrix_ages_text,
@@ -2202,8 +2375,22 @@ with tab6:
         elif not matrix_probs:
             st.error("Debes ingresar al menos una probabilidad válida, por ejemplo 80, 90 o 95.")
         else:
-            with st.spinner("Calculando matriz de capital requerido..."):
-                retirement_matrix = required_capital_matrix_mm(
+            with st.spinner("Calculando FIRE realista, Coast FIRE y matriz..."):
+                saving_ranges_for_scan = result["inputs"].get("saving_ranges") or tuple()
+                recurring_events_for_scan = st.session_state.get("mc_recurring_events", tuple())
+                lump_events_monthly_for_scan = result["inputs"].get("lump_sum_events") or tuple()
+                lump_events_age_for_matrix = st.session_state.get("mc_lump_age_events", tuple())
+
+                fire_scan_df = run_fire_scan(
+                    base_result=result,
+                    retirement_ages=matrix_ages,
+                    n_paths=int(matrix_n_paths),
+                    saving_ranges=saving_ranges_for_scan,
+                    recurring_events=recurring_events_for_scan,
+                    lump_events_monthly=lump_events_monthly_for_scan,
+                )
+
+                required_matrix = required_capital_matrix_mm(
                     edad_final=EDAD_FINAL_FIJA,
                     retirement_ages=matrix_ages,
                     success_probabilities=matrix_probs,
@@ -2216,51 +2403,174 @@ with tab6:
                     withdrawal_timing=str(result["inputs"].get("withdrawal_timing", "end")),
                     seed=int(result["inputs"].get("seed", 123)) + 2026,
                     mean_is_effective=bool(result["inputs"].get("mean_is_effective", True)),
-                    lump_sum_age_events=st.session_state.get("mc_lump_age_events", tuple()),
-                    recurring_monthly_events=st.session_state.get("mc_recurring_events", tuple()),
+                    lump_sum_age_events=lump_events_age_for_matrix,
+                    recurring_monthly_events=recurring_events_for_scan,
                     return_model=str(result["inputs"].get("return_model", "monthly_iid")),
                     withdrawal_indexed_to_inflation=bool(result["inputs"].get("withdrawal_indexed_to_inflation", False)),
                     inflation_annual=float(result["inputs"].get("inflation_annual", 0.0)),
                     withdrawal_index_base_age=float(result["inputs"].get("withdrawal_index_base_age", result["inputs"].get("edad_inicial"))),
                 )
-                st.session_state["mc_retirement_matrix"] = retirement_matrix
-                st.success("Matriz calculada.")
+                realistic_matrix = build_realistic_matrix(required_matrix["matrix_clp"], fire_scan_df)
 
-    retirement_matrix = st.session_state.get("mc_retirement_matrix")
-    if retirement_matrix is None:
-        st.warning("Presiona **Calcular matriz de capital requerido** para generar la tabla.")
+                # FIRE anticipado: busca la primera edad evaluada donde podrías retirarte
+                # con el retiro mensual deseado y el éxito objetivo.
+                target_row = find_fire_row(fire_scan_df, float(fire_target_success_pct))
+
+                # Coast FIRE / Cost FIRE: responde otra pregunta distinta.
+                # Mantiene la edad de retiro que el usuario eligió en el escenario base,
+                # y busca desde qué edad podría dejar de ahorrar y aun así llegar a esa
+                # edad de retiro con el éxito objetivo.
+                planned_fire_age = int(result["inputs"].get("edad_inicio_retiro"))
+                coast_df = run_coast_scan(
+                    base_result=result,
+                    fire_age=planned_fire_age,
+                    target_success_pct=float(fire_target_success_pct),
+                    n_paths=int(matrix_n_paths),
+                    saving_ranges=saving_ranges_for_scan,
+                    recurring_events=recurring_events_for_scan,
+                    lump_events_monthly=lump_events_monthly_for_scan,
+                )
+
+                analysis = {
+                    "required_matrix": required_matrix,
+                    "realistic_matrix_clp": realistic_matrix,
+                    "fire_scan": fire_scan_df,
+                    "coast_scan": coast_df,
+                    "target_success_pct": float(fire_target_success_pct),
+                    "planned_fire_age": planned_fire_age,
+                    "planned_fire_success_pct": float(result["prob_no_ruin"] * 100),
+                    "ages": matrix_ages,
+                    "probabilities": matrix_probs,
+                }
+                st.session_state["mc_retirement_matrix"] = required_matrix
+                st.session_state["mc_fire_analysis"] = analysis
+                st.success("Análisis FIRE / Coast / matriz calculado.")
+
+    analysis = st.session_state.get("mc_fire_analysis")
+    if analysis is None:
+        st.warning("Presiona **Calcular FIRE / Coast / matriz realista** para generar el análisis.")
     else:
-        matrix_clp = retirement_matrix["matrix_clp"]
-        st.plotly_chart(plot_required_capital_heatmap(matrix_clp), width="stretch")
-        st.write("Matriz nominal en CLP a la edad de retiro")
-        st.dataframe(format_required_matrix_clp(matrix_clp), width="stretch")
+        fire_scan_df = analysis.get("fire_scan", pd.DataFrame())
+        realistic_matrix_clp = analysis.get("realistic_matrix_clp", pd.DataFrame())
+        required_matrix = analysis.get("required_matrix")
+        target_success_pct = float(analysis.get("target_success_pct", 90))
+        target_row = find_fire_row(fire_scan_df, target_success_pct)
+        coast_scan_df = analysis.get("coast_scan", pd.DataFrame())
+        coast_ok = coast_scan_df[coast_scan_df["cumple_objetivo"]].sort_values("edad_dejar_ahorrar") if coast_scan_df is not None and not coast_scan_df.empty else pd.DataFrame()
+        coast_row = coast_ok.iloc[0] if not coast_ok.empty else None
 
-        long_csv = retirement_matrix["long"].to_csv(index=False).encode("utf-8-sig")
-        matrix_csv = matrix_clp.reset_index().to_csv(index=False).encode("utf-8-sig")
-        cmat1, cmat2 = st.columns(2)
-        with cmat1:
-            st.download_button(
-                "Descargar matriz CSV",
-                data=matrix_csv,
-                file_name="matriz_capital_requerido_clp.csv",
-                mime="text/csv",
-            )
-        with cmat2:
-            st.download_button(
-                "Descargar formato largo CSV",
-                data=long_csv,
-                file_name="matriz_capital_requerido_largo.csv",
-                mime="text/csv",
-            )
+        planned_fire_age = int(analysis.get("planned_fire_age", result["inputs"].get("edad_inicio_retiro")))
+        planned_fire_success_pct = float(analysis.get("planned_fire_success_pct", result["prob_no_ruin"] * 100))
 
-        with st.expander("Cómo leer esta matriz", expanded=False):
+        st.markdown("#### Resultado FIRE realista")
+        st.caption(
+            f"FIRE anticipado busca la primera edad evaluada donde podrías retirarte con {fmt_pct(target_success_pct)} de éxito. "
+            f"Coast FIRE usa tu edad de retiro elegida ({planned_fire_age} años) y busca desde qué edad puedes dejar de ahorrar."
+        )
+        out_cols = st.columns(4)
+        if target_row is None:
+            with out_cols[0]:
+                metric_card("Edad FIRE mínima", "No alcanza", f"Ninguna edad evaluada llega a {fmt_pct(target_success_pct)} de éxito.", "bad")
+            with out_cols[1]:
+                metric_card("Capital mediano al FIRE", "N/A", "No hay edad viable dentro de las evaluadas.", "bad")
+            with out_cols[2]:
+                metric_card("Primer retiro nominal", "N/A", "No hay edad viable dentro de las evaluadas.", "bad")
+            with out_cols[3]:
+                if coast_row is None:
+                    metric_card(
+                        "Coast FIRE / Cost FIRE",
+                        "No alcanza",
+                        f"Retiro objetivo a los {planned_fire_age} años: {fmt_pct(planned_fire_success_pct, 2)} de éxito.",
+                        "bad",
+                    )
+                else:
+                    metric_card(
+                        "Coast FIRE / Cost FIRE",
+                        f"{int(coast_row['edad_dejar_ahorrar'])} años",
+                        f"Para retirarte a los {planned_fire_age} años con {fmt_pct(target_success_pct)}+ de éxito.",
+                        "primary",
+                    )
+        else:
+            with out_cols[0]:
+                metric_card(
+                    "Edad FIRE mínima",
+                    f"{int(target_row['edad_retiro'])} años",
+                    f"Primera edad evaluada con al menos {fmt_pct(target_success_pct)} de éxito.",
+                    "good",
+                )
+            with out_cols[1]:
+                metric_card(
+                    "Capital mediano al FIRE",
+                    fmt_clp(target_row["capital_p50_retiro_clp"]),
+                    "P50 del patrimonio acumulado justo al empezar a retirar.",
+                    "cyan",
+                )
+            with out_cols[2]:
+                metric_card(
+                    "Primer retiro nominal",
+                    fmt_clp(target_row["primer_retiro_nominal_clp"]),
+                    "Monto mensual de inicio en pesos de esa edad.",
+                    "orange",
+                )
+            with out_cols[3]:
+                if coast_row is None:
+                    metric_card(
+                        "Coast FIRE / Cost FIRE",
+                        "No alcanza",
+                        f"Aun ahorrando hasta los {planned_fire_age} años, el escenario llega a {fmt_pct(planned_fire_success_pct, 2)} de éxito.",
+                        "bad",
+                    )
+                else:
+                    metric_card(
+                        "Coast FIRE / Cost FIRE",
+                        f"{int(coast_row['edad_dejar_ahorrar'])} años",
+                        f"Puedes dejar de ahorrar ahí y retirarte a los {planned_fire_age} años. Capital P50: {fmt_clp(coast_row['capital_p50_al_dejar_ahorrar_clp'])}.",
+                        "primary",
+                    )
+
+        st.markdown("#### Matriz realista de capital nominal requerido")
+        st.caption(
+            "Cada celda muestra el capital nominal requerido en esa edad solo si el escenario completo logra el éxito de esa fila. "
+            "Si dice 'No alcanza', con tus supuestos de ahorro/capital/ingresos no llegarías a esa condición en esa edad."
+        )
+        st.plotly_chart(plot_realistic_required_capital_heatmap(realistic_matrix_clp), width="stretch")
+        st.dataframe(format_realistic_matrix_clp(realistic_matrix_clp), width="stretch")
+
+        st.markdown("#### Auditoría por edad")
+        audit = fire_scan_df.copy()
+        if not audit.empty:
+            audit_display = audit.copy()
+            for col in ["capital_p5_retiro_clp", "capital_p50_retiro_clp", "capital_p95_retiro_clp", "patrimonio_p50_90_clp", "primer_retiro_nominal_clp"]:
+                audit_display[col] = audit_display[col].apply(fmt_clp)
+            audit_display["prob_exito_pct"] = audit_display["prob_exito_pct"].apply(lambda x: fmt_pct(x, 2))
+            st.dataframe(audit_display, width="stretch", hide_index=True)
+
+        if coast_scan_df is not None and not coast_scan_df.empty:
+            with st.expander("Detalle Coast FIRE / Cost FIRE", expanded=False):
+                coast_display = coast_scan_df.copy()
+                for col in ["capital_p50_al_dejar_ahorrar_clp", "capital_p50_al_fire_clp"]:
+                    coast_display[col] = coast_display[col].apply(fmt_clp)
+                coast_display["prob_exito_pct"] = coast_display["prob_exito_pct"].apply(lambda x: fmt_pct(x, 2))
+                st.dataframe(coast_display, width="stretch", hide_index=True)
+
+        csv1 = fire_scan_df.to_csv(index=False).encode("utf-8-sig")
+        csv2 = realistic_matrix_clp.reset_index().to_csv(index=False).encode("utf-8-sig")
+        csv3 = coast_scan_df.to_csv(index=False).encode("utf-8-sig") if coast_scan_df is not None else b""
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            st.download_button("Descargar FIRE por edad", data=csv1, file_name="fire_realista_por_edad.csv", mime="text/csv")
+        with d2:
+            st.download_button("Descargar matriz realista", data=csv2, file_name="matriz_fire_realista.csv", mime="text/csv")
+        with d3:
+            st.download_button("Descargar Coast FIRE", data=csv3, file_name="coast_fire.csv", mime="text/csv")
+
+        with st.expander("Cómo leer esta sección", expanded=False):
             st.markdown(
                 """
-                - **Columnas:** edad a la que empiezas el retiro.
-                - **Filas:** probabilidad de éxito objetivo.
-                - **Celda:** capital nominal requerido en esa edad para llegar a los 90 sin agotar patrimonio.
-                - Si la celda de **Edad 42 / 90%** dice `$X`, significa que, bajo estos supuestos, necesitarías tener aproximadamente `$X` nominales a los 42 para que 90% de los paths sobreviva hasta los 90.
-                - El retiro mensual ingresado se interpreta como plata de hoy; si está indexado, se lleva a pesos nominales al momento de retiro.
+                - **Edad FIRE mínima:** primera edad evaluada donde podrías empezar a retirar el monto mensual deseado y llegar a los 90 con el éxito objetivo. Puede ser antes que tu edad de retiro elegida.
+                - **Coast FIRE / Cost FIRE:** primera edad donde podrías dejar de ahorrar, mantener el capital invertido, y aun así retirarte a la edad que elegiste en el escenario base.
+                - **Matriz realista:** muestra capital nominal requerido solo en las edades donde tu plan simulado realmente logra el éxito de esa fila. Si dice **No alcanza**, no basta con mirar el capital requerido teórico: con tus supuestos no llegarías a esa condición.
+                - El retiro mensual ingresado se interpreta como plata de hoy. Si está indexado, el primer retiro nominal aumenta según la inflación acumulada hasta la edad de retiro.
                 """
             )
 
@@ -2303,6 +2613,7 @@ with tab7:
         st.session_state.get("mc_lump_df"),
         st.session_state.get("mc_afp_info"),
         st.session_state.get("mc_retirement_matrix"),
+        st.session_state.get("mc_fire_analysis"),
         include_paths=bool(include_paths_export),
     )
 
