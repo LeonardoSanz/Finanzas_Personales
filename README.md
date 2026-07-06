@@ -315,3 +315,8 @@ Se mantienen solo cuatro cards principales del escenario:
 - Patrimonio mediano a los 90.
 - Probabilidad de no agotar patrimonio.
 - Si falla, edad mediana de agotamiento.
+
+## Ajustes recientes
+
+- Se agregó **indexación del ahorro por inflación**. Los montos de ahorro en los tramos se interpretan como pesos de hoy y, si la casilla está activa, crecen con inflación hasta la edad de retiro. Esto permite modelar sueldos/ahorros reajustados por IPC.
+- Se rediseñó el heatmap de **Matriz FIRE realista** para evitar etiquetas superpuestas. Las celdas viables muestran el capital nominal requerido en formato compacto; las celdas no viables se marcan con `—`.

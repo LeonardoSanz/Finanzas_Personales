@@ -143,6 +143,7 @@ def monte_carlo_accumulation_withdrawal_mm(
     withdrawal_indexed_to_inflation: bool = False,
     inflation_annual: float = 0.0,
     withdrawal_index_base_age: Optional[float] = None,
+    savings_indexed_to_inflation: bool = False,
 ) -> dict:
     """
     Simula patrimonio en MM CLP con dos fases:
@@ -374,6 +375,32 @@ def monte_carlo_accumulation_withdrawal_mm(
             )
 
     # -----------------------------
+    # Indexación del ahorro
+    # -----------------------------
+    # Los montos de ahorro ingresados se interpretan como pesos de hoy.
+    # Si se activa la indexación, el ahorro mensual sube con inflación
+    # hasta la edad de retiro, igual que un sueldo reajustado por IPC.
+    if savings_indexed_to_inflation:
+        monthly_inflation_savings = (1 + inflation_annual) ** (1 / 12) - 1 if inflation_annual > -1 else 0.0
+        saving_factors = (1 + monthly_inflation_savings) ** np.arange(months, dtype=np.float64)
+        saving_min_schedule *= saving_factors
+        saving_mode_schedule *= saving_factors
+        saving_max_schedule *= saving_factors
+        for row in saving_range_rows:
+            m0 = max(int(row.get("mes_inicio", 1)) - 1, 0)
+            m1 = min(max(int(row.get("mes_fin", m0 + 1)), m0 + 1), months)
+            row["indexado_inflacion"] = True
+            row["ahorro_min_inicio_nominal_mm"] = float(saving_min_schedule[m0]) if m0 < months else 0.0
+            row["ahorro_mode_inicio_nominal_mm"] = float(saving_mode_schedule[m0]) if m0 < months else 0.0
+            row["ahorro_max_inicio_nominal_mm"] = float(saving_max_schedule[m0]) if m0 < months else 0.0
+            row["ahorro_min_fin_nominal_mm"] = float(saving_min_schedule[m1 - 1]) if m1 > m0 else 0.0
+            row["ahorro_mode_fin_nominal_mm"] = float(saving_mode_schedule[m1 - 1]) if m1 > m0 else 0.0
+            row["ahorro_max_fin_nominal_mm"] = float(saving_max_schedule[m1 - 1]) if m1 > m0 else 0.0
+    else:
+        for row in saving_range_rows:
+            row["indexado_inflacion"] = False
+
+    # -----------------------------
     # Retiros mensuales fijos
     # -----------------------------
     withdrawal_schedule = np.zeros(months, dtype=np.float64)
@@ -561,6 +588,7 @@ def monte_carlo_accumulation_withdrawal_mm(
             "withdrawal_indexed_to_inflation": withdrawal_indexed_to_inflation,
             "inflation_annual": inflation_annual,
             "withdrawal_index_base_age": float(edad_inicial if withdrawal_index_base_age is None else withdrawal_index_base_age),
+            "savings_indexed_to_inflation": bool(savings_indexed_to_inflation),
             "path_memory_mb": path_memory_mb,
         },
         "summary": final_summary,

@@ -77,6 +77,26 @@ def fmt_clp(value_clp: float | int) -> str:
     return f"${fmt_int_dot(value_clp)}"
 
 
+def fmt_clp_compact(value_clp: float | int, decimals: int = 0) -> str:
+    """Formato compacto para etiquetas de gráficos: $2.350 MM o $1,2 B."""
+    if value_clp is None or (isinstance(value_clp, float) and np.isnan(value_clp)):
+        return "N/A"
+    value = float(value_clp)
+    sign = "-" if value < 0 else ""
+    value_abs = abs(value)
+    if value_abs >= 1_000_000_000_000:
+        scaled = value_abs / 1_000_000_000_000
+        suffix = "B"
+        dec = 1
+    else:
+        scaled = value_abs / 1_000_000
+        suffix = "MM"
+        dec = decimals
+    text = f"{scaled:,.{dec}f}"
+    text = text.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{sign}${text} {suffix}"
+
+
 def fmt_clp_from_mm(value_mm: float | int) -> str:
     if value_mm is None or (isinstance(value_mm, float) and np.isnan(value_mm)):
         return "N/A"
@@ -1228,6 +1248,7 @@ def run_fire_scan(
             withdrawal_indexed_to_inflation=bool(inputs.get("withdrawal_indexed_to_inflation", False)),
             inflation_annual=float(inputs.get("inflation_annual", 0.0)),
             withdrawal_index_base_age=float(inputs.get("withdrawal_index_base_age", inputs.get("edad_inicial"))),
+            savings_indexed_to_inflation=bool(inputs.get("savings_indexed_to_inflation", False)),
         )
         w_ret = np.asarray(sim["wealth_at_retirement_mm"], dtype=float)
         rows.append(
@@ -1278,54 +1299,85 @@ def format_realistic_matrix_clp(realistic_matrix_clp: pd.DataFrame, required_mat
 
 
 def plot_realistic_required_capital_heatmap(realistic_matrix_clp: pd.DataFrame) -> go.Figure:
-    """Heatmap de matriz realista; las celdas no alcanzables quedan vacías."""
+    """Heatmap legible de matriz realista.
+
+    Las celdas viables se colorean por magnitud y muestran montos compactos.
+    Las celdas no alcanzables se muestran como "—" para no saturar el gráfico.
+    """
     if realistic_matrix_clp is None or realistic_matrix_clp.empty:
         fig = go.Figure()
         fig.update_layout(title="Matriz realista no disponible")
         return apply_plot_theme(fig, y_currency=False, x_currency=False)
-    z = realistic_matrix_clp.astype(float).values
+
+    raw = realistic_matrix_clp.astype(float).values
+    valid = np.isfinite(raw)
     x = [f"{int(c)}" for c in realistic_matrix_clp.columns]
     y = [f"{idx:,.0f}%".replace(",", ".") for idx in realistic_matrix_clp.index]
-    text = np.empty(z.shape, dtype=object)
-    for i in range(z.shape[0]):
-        for j in range(z.shape[1]):
-            text[i, j] = fmt_clp(z[i, j]) if np.isfinite(z[i, j]) else "No alcanza"
+
+    z = np.zeros_like(raw, dtype=float)
+    if valid.any():
+        vmin = float(np.nanmin(raw))
+        vmax = float(np.nanmax(raw))
+        if abs(vmax - vmin) < 1e-9:
+            z[valid] = 0.70
+        else:
+            z[valid] = 0.25 + 0.75 * (raw[valid] - vmin) / (vmax - vmin)
+
+    text = np.empty(raw.shape, dtype=object)
+    hover = np.empty(raw.shape, dtype=object)
+    for i in range(raw.shape[0]):
+        for j in range(raw.shape[1]):
+            if valid[i, j]:
+                text[i, j] = fmt_clp_compact(raw[i, j], decimals=0)
+                hover[i, j] = fmt_clp(raw[i, j])
+            else:
+                text[i, j] = "—"
+                hover[i, j] = "No alcanza con el plan actual"
+
     fig = go.Figure(
         data=go.Heatmap(
             z=z,
             x=x,
             y=y,
             text=text,
+            customdata=hover,
             texttemplate="%{text}",
-            textfont={"size": 12, "color": COLOR_TEXT},
+            textfont={"size": 11, "color": COLOR_TEXT},
+            xgap=3,
+            ygap=3,
             colorscale=[
-                [0.0, "rgba(0, 209, 255, 0.30)"],
-                [0.45, "rgba(139, 61, 255, 0.62)"],
-                [1.0, "rgba(255, 92, 122, 0.84)"],
+                [0.0, "rgba(20, 31, 66, 0.55)"],
+                [0.249, "rgba(20, 31, 66, 0.55)"],
+                [0.25, "rgba(0, 209, 255, 0.38)"],
+                [0.55, "rgba(139, 61, 255, 0.70)"],
+                [1.0, "rgba(255, 92, 122, 0.90)"],
             ],
-            colorbar={"title": "Capital nominal CLP", "tickprefix": "$", "tickformat": ",.0f"},
-            hovertemplate="Edad retiro %{x}<br>Éxito objetivo %{y}<br>%{text}<extra></extra>",
-            hoverongaps=False,
+            showscale=False,
+            hovertemplate="Edad retiro %{x}<br>Éxito objetivo %{y}<br>%{customdata}<extra></extra>",
         )
     )
-    # Plotly no siempre imprime texto sobre celdas NaN; agregamos anotaciones explícitas.
-    for i, yy in enumerate(y):
-        for j, xx in enumerate(x):
-            if not np.isfinite(z[i, j]):
-                fig.add_annotation(
-                    x=xx,
-                    y=yy,
-                    text="No alcanza",
-                    showarrow=False,
-                    font={"size": 11, "color": COLOR_MUTED},
-                )
     fig.update_layout(
-        title="Matriz FIRE realista: capital requerido solo donde tu plan alcanza el éxito objetivo",
+        title="Matriz FIRE realista — capital nominal requerido",
         xaxis_title="Edad a la que empiezas a retirar",
         yaxis_title="Probabilidad de éxito objetivo",
         height=520,
         separators=",.",
+        margin=dict(l=70, r=30, t=75, b=75),
+        annotations=[
+            dict(
+                x=0,
+                y=1.08,
+                xref="paper",
+                yref="paper",
+                text="— = tu plan simulado no alcanza esa combinación de edad y éxito",
+                showarrow=False,
+                align="left",
+                font=dict(size=12, color=COLOR_MUTED),
+            )
+        ],
     )
+    fig.update_xaxes(type="category", tickangle=0)
+    fig.update_yaxes(type="category")
     return apply_plot_theme(fig, y_currency=False, x_currency=False)
 
 
@@ -1383,6 +1435,7 @@ def run_coast_scan(
             withdrawal_indexed_to_inflation=bool(inputs.get("withdrawal_indexed_to_inflation", False)),
             inflation_annual=float(inputs.get("inflation_annual", 0.0)),
             withdrawal_index_base_age=float(inputs.get("withdrawal_index_base_age", inputs.get("edad_inicial"))),
+            savings_indexed_to_inflation=bool(inputs.get("savings_indexed_to_inflation", False)),
         )
         coast_month = int(round((coast_age - edad_inicial) * 12))
         coast_month = min(max(coast_month, 0), sim["paths_mm"].shape[1] - 1)
@@ -1693,11 +1746,17 @@ with st.form("formulario_simulacion"):
             "Rangos de ahorro mensual por edad",
             "Cada tramo usa distribución triangular: mínimo, más probable y máximo. Desde la edad de retiro el ahorro patrimonial queda automáticamente en cero.",
         )
-        t1, t2 = st.columns([3, 1])
+        t1, t2, t3 = st.columns([2.2, 1, 1])
         with t1:
             st.caption("Default: etapa actual fuerte, menor ahorro entre 30 y 40 por hijos/familia, y recuperación hasta la edad de retiro.")
         with t2:
             contribution_timing_es = st.selectbox("Timing ahorro", ["Fin de mes", "Inicio de mes"], index=0)
+        with t3:
+            savings_indexed_to_inflation = st.checkbox(
+                "Indexar ahorro por inflación",
+                value=True,
+                help="Si está activo, los ahorros de la tabla se interpretan como pesos de hoy y suben con inflación hasta el retiro.",
+            )
 
         default_saving_rows = []
         if int(edad_inicio_retiro) > int(edad_inicial):
@@ -2064,6 +2123,7 @@ if submitted:
                 withdrawal_indexed_to_inflation=bool(withdrawal_indexed_to_inflation),
                 inflation_annual=float(inflation_annual_pct) / 100,
                 withdrawal_index_base_age=float(edad_inicial),
+                savings_indexed_to_inflation=bool(savings_indexed_to_inflation),
             )
             result["afp_info"] = afp_info
             tabla = tabla_monte_carlo_por_edad(result)
