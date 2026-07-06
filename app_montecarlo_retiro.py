@@ -1681,7 +1681,7 @@ with st.form("formulario_simulacion"):
 
     input_tabs = st.tabs([
         "1. Base",
-        "2. Ahorro por edad",
+        "2. Ahorro mensual",
         "3. AFP",
         "4. Ingresos / gastos",
         "5. Eventos únicos",
@@ -1743,82 +1743,63 @@ with st.form("formulario_simulacion"):
 
     with input_tabs[1]:
         panel_start(
-            "Rangos de ahorro mensual por edad",
-            "Cada tramo usa distribución triangular: mínimo, más probable y máximo. Desde la edad de retiro el ahorro patrimonial queda automáticamente en cero.",
+            "Ahorro mensual antes del retiro",
+            "Usa un único monto esperado de ahorro mensual. La simulación aplica una variación fija de ±$500.000 alrededor de ese monto y desde la edad de retiro el ahorro queda automáticamente en cero.",
         )
-        t1, t2, t3 = st.columns([2.2, 1, 1])
+        t1, t2, t3 = st.columns([1.4, 1, 1])
         with t1:
-            st.caption("Default: etapa actual fuerte, menor ahorro entre 30 y 40 por hijos/familia, y recuperación hasta la edad de retiro.")
+            monthly_saving_clp = money_text_input(
+                "Ahorro mensual esperado CLP",
+                3_000_000,
+                key="monthly_saving_expected_clp_text",
+                help="Monto central de ahorro mensual en pesos de hoy. Ej: 3.000.000.",
+            )
         with t2:
             contribution_timing_es = st.selectbox("Timing ahorro", ["Fin de mes", "Inicio de mes"], index=0)
         with t3:
             savings_indexed_to_inflation = st.checkbox(
                 "Indexar ahorro por inflación",
                 value=True,
-                help="Si está activo, los ahorros de la tabla se interpretan como pesos de hoy y suben con inflación hasta el retiro.",
+                help="Si está activo, el ahorro se interpreta como pesos de hoy y sube con inflación hasta el retiro.",
             )
 
-        default_saving_rows = []
-        if int(edad_inicio_retiro) > int(edad_inicial):
-            if int(edad_inicial) < 30:
-                default_saving_rows.append(
-                    {
-                        "descripcion": "Etapa actual",
-                        "edad_inicio": int(edad_inicial),
-                        "edad_fin": min(30, int(edad_inicio_retiro)),
-                        "ahorro_min_clp": "2.500.000",
-                        "ahorro_probable_clp": "3.000.000",
-                        "ahorro_max_clp": "3.500.000",
-                    }
-                )
-            if int(edad_inicio_retiro) > max(30, int(edad_inicial)):
-                default_saving_rows.append(
-                    {
-                        "descripcion": "Hijos / menor ahorro",
-                        "edad_inicio": max(30, int(edad_inicial)),
-                        "edad_fin": min(40, int(edad_inicio_retiro)),
-                        "ahorro_min_clp": "1.000.000",
-                        "ahorro_probable_clp": "1.500.000",
-                        "ahorro_max_clp": "2.000.000",
-                    }
-                )
-            if int(edad_inicio_retiro) > max(40, int(edad_inicial)):
-                default_saving_rows.append(
-                    {
-                        "descripcion": "Recuperación ahorro",
-                        "edad_inicio": max(40, int(edad_inicial)),
-                        "edad_fin": int(edad_inicio_retiro),
-                        "ahorro_min_clp": "2.000.000",
-                        "ahorro_probable_clp": "2.500.000",
-                        "ahorro_max_clp": "3.000.000",
-                    }
-                )
-        if not default_saving_rows:
-            default_saving_rows.append(
-                {
-                    "descripcion": "Sin ahorro previo al retiro",
-                    "edad_inicio": int(edad_inicial),
-                    "edad_fin": min(int(edad_inicial) + 1, EDAD_FINAL_FIJA),
-                    "ahorro_min_clp": "0",
-                    "ahorro_probable_clp": "0",
-                    "ahorro_max_clp": "0",
-                }
+        SAVING_BAND_CLP = 500_000
+        saving_min_clp = max(int(monthly_saving_clp) - SAVING_BAND_CLP, 0)
+        saving_mode_clp = max(int(monthly_saving_clp), 0)
+        saving_max_clp = max(int(monthly_saving_clp) + SAVING_BAND_CLP, 0)
+
+        s1, s2, s3 = st.columns(3)
+        with s1:
+            st.markdown(
+                f"""<div class="mini-card"><b>Ahorro mínimo simulado</b><span>{fmt_clp(saving_min_clp)}</span></div>""",
+                unsafe_allow_html=True,
             )
-        default_saving_df = pd.DataFrame(default_saving_rows)
-        saving_ranges_df = st.data_editor(
-            default_saving_df,
-            num_rows="dynamic",
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "descripcion": st.column_config.TextColumn("Descripción"),
-                "edad_inicio": st.column_config.NumberColumn("Edad inicio", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
-                "edad_fin": st.column_config.NumberColumn("Edad fin", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, step=1),
-                "ahorro_min_clp": st.column_config.TextColumn("Ahorro mínimo CLP", help="Ej: 1.000.000 o 1 MM"),
-                "ahorro_probable_clp": st.column_config.TextColumn("Ahorro más probable CLP", help="Ej: 1.500.000 o 1,5 MM"),
-                "ahorro_max_clp": st.column_config.TextColumn("Ahorro máximo CLP", help="Ej: 2.000.000 o 2 MM"),
-            },
-            key="saving_ranges_editor",
+        with s2:
+            st.markdown(
+                f"""<div class="mini-card"><b>Ahorro esperado</b><span>{fmt_clp(saving_mode_clp)}</span></div>""",
+                unsafe_allow_html=True,
+            )
+        with s3:
+            st.markdown(
+                f"""<div class="mini-card"><b>Ahorro máximo simulado</b><span>{fmt_clp(saving_max_clp)}</span></div>""",
+                unsafe_allow_html=True,
+            )
+
+        st.caption(
+            "La banda ±$500.000 se aplica todos los meses. El motor usa distribución triangular entre mínimo, esperado y máximo; si activas indexación, todos esos montos se reajustan con inflación hasta la edad de retiro."
+        )
+
+        saving_ranges_df = pd.DataFrame(
+            [
+                {
+                    "descripcion": "Ahorro mensual único",
+                    "edad_inicio": int(edad_inicial),
+                    "edad_fin": EDAD_FINAL_FIJA,
+                    "ahorro_min_clp": str(saving_min_clp),
+                    "ahorro_probable_clp": str(saving_mode_clp),
+                    "ahorro_max_clp": str(saving_max_clp),
+                }
+            ]
         )
         panel_end()
 
