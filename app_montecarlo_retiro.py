@@ -1651,7 +1651,7 @@ def make_executive_excel_report(
         fmt_text = wb.add_format({"font_color": "#0B1F4A", "border": 1, "border_color": "#D9E2F3"})
         fmt_note = wb.add_format({"font_color": "#102B66", "bg_color": "#EAF2FF", "text_wrap": True, "border": 1, "border_color": "#B8C4D8"})
         fmt_money = wb.add_format({"num_format": '[$$-es-CL] #,##0', "font_color": "#0B1F4A", "border": 1, "border_color": "#D9E2F3"})
-        fmt_pct = wb.add_format({"num_format": "0.0%", "font_color": "#0B1F4A", "border": 1, "border_color": "#D9E2F3"})
+        fmt_pct_cell = wb.add_format({"num_format": "0.0%", "font_color": "#0B1F4A", "border": 1, "border_color": "#D9E2F3"})
         fmt_num = wb.add_format({"num_format": "#,##0.0", "font_color": "#0B1F4A", "border": 1, "border_color": "#D9E2F3"})
         fmt_int = wb.add_format({"num_format": "#,##0", "font_color": "#0B1F4A", "border": 1, "border_color": "#D9E2F3"})
         fmt_good = wb.add_format({"bold": True, "font_color": "#FFFFFF", "bg_color": "#30D158", "border": 1, "border_color": "#30D158"})
@@ -1704,7 +1704,7 @@ def make_executive_excel_report(
                     if col in money_cols:
                         fmt = fmt_money
                     elif col in pct_cols:
-                        fmt = fmt_pct
+                        fmt = fmt_pct_cell
                     elif col in int_cols:
                         fmt = fmt_int
                     elif isinstance(val, (int, float, np.integer, np.floating)) and pd.notna(val):
