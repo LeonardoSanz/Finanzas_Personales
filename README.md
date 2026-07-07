@@ -27,7 +27,7 @@ La edad final está fija en **90 años**.
 - Edad final fija en 90 años.
 - Inputs monetarios como texto para poder escribir `50.000.000`, `$50.000.000` o `50 MM`.
 - Tabla de **ahorro mensual por edad**, con un monto esperado por tramo, banda automática fija de ±$500.000 e indexación opcional por inflación.
-- Bloque para calcular **jubilación AFP estimada** usando saldo actual, ahorro mensual AFP, retorno real y tasa de retiro.
+- Bloque para calcular **jubilación AFP estimada** usando saldo actual, ahorro mensual AFP, fondo AFP, retorno real promedio y desviación estándar según supuestos de la Superintendencia de Pensiones.
 - Tabla para flujos mensuales recurrentes indexables:
   - arriendos,
   - otros ingresos o egresos,
@@ -70,21 +70,34 @@ El gráfico mostrará el arriendo nominal estimado a los 40, 50, 65 y 90 años, 
 
 ## Jubilación AFP estimada
 
-La app incluye un bloque para calcular una jubilación AFP aproximada:
+La app incluye un bloque para calcular una jubilación AFP aproximada por simulación:
 
 - saldo AFP actual,
 - ahorro mensual AFP,
 - edad de jubilación AFP,
-- retorno real anual, por defecto `5%`,
+- fondo AFP o supuesto SP,
+- escenario usado como pensión: P5, P25, P50 o P75,
 - tasa de retiro anual, por defecto `3,2%`.
 
-La fórmula trabaja en pesos reales/de hoy:
+Los retornos reales anualizados usados para AFP vienen de la tabla indicada por el usuario como fuente Superintendencia de Pensiones:
 
-1. Capitaliza el saldo AFP y el ahorro mensual AFP con retorno real.
-2. Al jubilar, calcula una pensión mensual como `saldo al jubilar × tasa de retiro anual / 12`.
-3. Esa pensión se agrega como ingreso recurrente indexado por inflación desde hoy.
+| Fondo | Promedio real anual | Desv. est. |
+|---|---:|---:|
+| Fondo A | 4,49% | 10,99% |
+| Fondo B | 4,02% | 8,53% |
+| Fondo C | 3,38% | 6,19% |
+| Fondo D | 2,81% | 4,52% |
+| Fondo E | 2,17% | 4,12% |
+| Renta Vitalicia | 3,11% | 0,65% |
 
-Esto evita el problema de comparar un retiro indexado con una jubilación/arriendo plano.
+La lógica trabaja en pesos reales/de hoy:
+
+1. Simula el saldo AFP al jubilar usando promedio y desviación estándar del fondo elegido.
+2. Selecciona un escenario de saldo, por defecto P50 mediano.
+3. Calcula una pensión mensual como `saldo elegido al jubilar × tasa de retiro anual / 12`.
+4. Esa pensión se agrega como ingreso recurrente indexado por inflación.
+
+Esto evita comparar un retiro indexado con una jubilación/arriendo plano y además reconoce la incertidumbre del fondo AFP.
 
 
 ## Diferencia entre modelos de retorno
@@ -161,7 +174,7 @@ Los flujos esporádicos son eventos únicos. Un ingreso positivo aumenta el patr
   - AFP actual $40.000.000,
   - ahorro mensual AFP $600.000,
   - jubilación AFP a los 60,
-  - retorno real AFP 5%,
+  - Fondo AFP C por defecto, usando promedio 3,38% y desviación estándar 6,19%,
   - tasa retiro AFP 3,2%,
   - arriendo desde los 52 por $1.200.000 indexado,
   - evento único a los 31 por $40.000.000.

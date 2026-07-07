@@ -50,6 +50,24 @@ PERCENTILE_COLORS = {
 
 EDAD_FINAL_FIJA = 90
 
+# Supuestos de retorno real anualizado entregados por el usuario
+# Fuente declarada en la app: Superintendencia de Pensiones.
+AFP_RETURN_ASSUMPTIONS = {
+    "Fondo A": {"mean": 0.0449, "std": 0.1099},
+    "Fondo B": {"mean": 0.0402, "std": 0.0853},
+    "Fondo C": {"mean": 0.0338, "std": 0.0619},
+    "Fondo D": {"mean": 0.0281, "std": 0.0452},
+    "Fondo E": {"mean": 0.0217, "std": 0.0412},
+    "Renta Vitalicia": {"mean": 0.0311, "std": 0.0065},
+}
+
+AFP_PERCENTILE_OPTIONS = {
+    "Conservador P25": 25,
+    "Mediano P50": 50,
+    "Optimista P75": 75,
+    "Muy conservador P5": 5,
+}
+
 
 # ============================================================
 # Formato CLP
@@ -201,6 +219,66 @@ def future_value_monthly_real_clp(
     if contribution_timing == "begin":
         fv_contrib *= (1 + rm)
     return fv_capital + fv_contrib
+
+
+
+
+def simulate_afp_future_balance_distribution_real_clp(
+    *,
+    initial_balance_clp: float,
+    monthly_contribution_clp: float,
+    annual_real_return_mean: float,
+    annual_real_return_std: float,
+    n_months: int,
+    n_paths: int,
+    seed: int | None = 2026,
+    contribution_timing: str = "end",
+) -> dict:
+    """
+    Simula saldo AFP real en pesos de hoy.
+
+    La SP entrega promedio y desviación estándar del retorno real anualizado.
+    Por simplicidad y consistencia con esa tabla, cada path toma un retorno anualizado
+    real de largo plazo y capitaliza saldo + aportes mensuales con ese retorno.
+    """
+    initial_balance_clp = max(float(initial_balance_clp), 0.0)
+    monthly_contribution_clp = max(float(monthly_contribution_clp), 0.0)
+    n_months = max(int(n_months), 0)
+    n_paths = max(int(n_paths), 1)
+
+    rng = np.random.default_rng(seed)
+    if n_months == 0:
+        balances = np.full(n_paths, initial_balance_clp, dtype=np.float64)
+        returns = np.full(n_paths, annual_real_return_mean, dtype=np.float64)
+    else:
+        # Evitamos retornos imposibles bajo -100% y extremos poco informativos en el gráfico.
+        returns = rng.normal(annual_real_return_mean, annual_real_return_std, size=n_paths)
+        returns = np.clip(returns, -0.95, 0.50)
+        rm = np.power(1 + returns, 1 / 12) - 1
+        balances = initial_balance_clp * np.power(1 + rm, n_months)
+
+        near_zero = np.abs(rm) < 1e-12
+        annuity = np.empty_like(rm, dtype=np.float64)
+        annuity[near_zero] = n_months
+        annuity[~near_zero] = (np.power(1 + rm[~near_zero], n_months) - 1) / rm[~near_zero]
+        if contribution_timing == "begin":
+            annuity = annuity * (1 + rm)
+        balances = balances + monthly_contribution_clp * annuity
+
+    percentiles = {
+        "p5": float(np.percentile(balances, 5)),
+        "p25": float(np.percentile(balances, 25)),
+        "p50": float(np.percentile(balances, 50)),
+        "p75": float(np.percentile(balances, 75)),
+        "p95": float(np.percentile(balances, 95)),
+    }
+    return {
+        "balances_real_clp": balances,
+        "annualized_returns_real": returns,
+        "mean_balance_real_clp": float(np.mean(balances)),
+        "std_balance_real_clp": float(np.std(balances, ddof=1)) if len(balances) > 1 else 0.0,
+        "percentiles_balance_real_clp": percentiles,
+    }
 
 
 # ============================================================
@@ -2135,41 +2213,97 @@ with st.form("formulario_simulacion"):
     with input_tabs[2]:
         panel_start(
             "Jubilación AFP estimada",
-            "Calcula una pensión real aproximada: saldo AFP + ahorro mensual AFP a retorno real, y luego retiro anual como % del saldo al jubilar. La pensión se indexa por inflación.",
+            "Usa los retornos reales anualizados informados por la Superintendencia de Pensiones: promedio y desviación estándar por fondo. La pensión se calcula por simulación y luego se indexa por inflación.",
         )
         afp_enable = st.checkbox("Agregar jubilación AFP calculada como ingreso recurrente", value=True)
-        afp1, afp2, afp3, afp4, afp5 = st.columns(5)
+
+        sp_returns_df = pd.DataFrame(
+            [
+                {
+                    "Fondo": fondo,
+                    "Retorno real anual promedio": f"{v['mean']*100:.2f}%".replace(".", ","),
+                    "Desv. est. anual": f"{v['std']*100:.2f}%".replace(".", ","),
+                }
+                for fondo, v in AFP_RETURN_ASSUMPTIONS.items()
+            ]
+        )
+        with st.expander("Ver supuestos SP usados para AFP", expanded=False):
+            st.dataframe(sp_returns_df, width="stretch", hide_index=True)
+            st.caption("Fuente: Superintendencia de Pensiones. Retornos reales anualizados entregados como promedio y desviación estándar. En la app se usan para simular el saldo AFP al jubilar.")
+
+        afp1, afp2, afp3 = st.columns(3)
         with afp1:
             afp_balance_clp = money_text_input("Saldo AFP actual CLP", 40_000_000, key="afp_balance_clp_text")
         with afp2:
             afp_monthly_contribution_clp = money_text_input("Ahorro mensual AFP CLP", 600_000, key="afp_monthly_contribution_clp_text")
         with afp3:
             afp_retirement_age = st.number_input("Edad jubilación AFP", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, value=min(max(60, int(edad_inicial)), EDAD_FINAL_FIJA), step=1)
+
+        afp4, afp5, afp6 = st.columns(3)
         with afp4:
-            afp_real_return_pct = st.number_input("Retorno real AFP anual (%)", min_value=-5.0, max_value=15.0, value=5.0, step=0.25)
+            afp_fund = st.selectbox("Fondo AFP / supuesto SP", list(AFP_RETURN_ASSUMPTIONS.keys()), index=2)
         with afp5:
+            afp_pension_percentile_label = st.selectbox("Escenario usado como pensión", list(AFP_PERCENTILE_OPTIONS.keys()), index=1)
+        with afp6:
             afp_withdrawal_rate_pct = st.number_input("Tasa retiro AFP anual (%)", min_value=0.0, max_value=10.0, value=3.2, step=0.1)
 
+        afp_return_mean = float(AFP_RETURN_ASSUMPTIONS[afp_fund]["mean"])
+        afp_return_std = float(AFP_RETURN_ASSUMPTIONS[afp_fund]["std"])
+        afp_selected_percentile = int(AFP_PERCENTILE_OPTIONS[afp_pension_percentile_label])
+
         months_to_afp = max(int(round((float(afp_retirement_age) - float(edad_inicial)) * 12)), 0)
-        afp_fv_real_clp = future_value_monthly_real_clp(
+        afp_sim = simulate_afp_future_balance_distribution_real_clp(
             initial_balance_clp=afp_balance_clp,
             monthly_contribution_clp=afp_monthly_contribution_clp,
-            annual_real_return=float(afp_real_return_pct) / 100,
+            annual_real_return_mean=afp_return_mean,
+            annual_real_return_std=afp_return_std,
             n_months=months_to_afp,
+            n_paths=20_000,
+            seed=2026,
             contribution_timing="end",
         )
+        afp_balance_percentiles = afp_sim["percentiles_balance_real_clp"]
+        afp_selected_key = f"p{afp_selected_percentile}"
+        afp_fv_real_clp = float(afp_balance_percentiles.get(afp_selected_key, afp_balance_percentiles["p50"]))
+        afp_fv_real_mean_clp = float(afp_sim["mean_balance_real_clp"])
         afp_monthly_pension_real_clp = afp_fv_real_clp * (float(afp_withdrawal_rate_pct) / 100) / 12
         afp_monthly_inflation = (1 + float(inflation_annual_pct) / 100) ** (1 / 12) - 1 if float(inflation_annual_pct) > -100 else 0.0
         afp_monthly_pension_nominal_start_clp = afp_monthly_pension_real_clp * (1 + afp_monthly_inflation) ** months_to_afp
 
-        afp_summary = st.columns(3)
+        afp_summary = st.columns(4)
         with afp_summary[0]:
-            st.markdown(f"""<div class="mini-card"><b>Saldo AFP al jubilar</b><span>{fmt_clp(afp_fv_real_clp)} de hoy</span></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="mini-card"><b>Fondo usado</b><span>{afp_fund}<br>μ {fmt_pct(afp_return_mean*100, 2)} · σ {fmt_pct(afp_return_std*100, 2)}</span></div>""", unsafe_allow_html=True)
         with afp_summary[1]:
-            st.markdown(f"""<div class="mini-card"><b>Pensión real mensual</b><span>{fmt_clp(afp_monthly_pension_real_clp)} de hoy</span></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="mini-card"><b>Saldo AFP al jubilar</b><span>{fmt_clp(afp_fv_real_clp)} de hoy<br>{afp_pension_percentile_label}</span></div>""", unsafe_allow_html=True)
         with afp_summary[2]:
+            st.markdown(f"""<div class="mini-card"><b>Pensión real mensual</b><span>{fmt_clp(afp_monthly_pension_real_clp)} de hoy</span></div>""", unsafe_allow_html=True)
+        with afp_summary[3]:
             st.markdown(f"""<div class="mini-card"><b>Pensión nominal inicial</b><span>{fmt_clp(afp_monthly_pension_nominal_start_clp)} a los {int(afp_retirement_age)}</span></div>""", unsafe_allow_html=True)
-        st.caption("Si el ahorro AFP ya está dentro de tus tramos de ahorro patrimonial, evita duplicarlo.")
+
+        afp_dist_df = pd.DataFrame(
+            {
+                "Percentil": ["P5", "P25", "P50", "P75", "P95", "Promedio"],
+                "Saldo AFP real al jubilar": [
+                    fmt_clp(afp_balance_percentiles["p5"]),
+                    fmt_clp(afp_balance_percentiles["p25"]),
+                    fmt_clp(afp_balance_percentiles["p50"]),
+                    fmt_clp(afp_balance_percentiles["p75"]),
+                    fmt_clp(afp_balance_percentiles["p95"]),
+                    fmt_clp(afp_fv_real_mean_clp),
+                ],
+                "Pensión mensual real aprox.": [
+                    fmt_clp(afp_balance_percentiles["p5"] * (float(afp_withdrawal_rate_pct) / 100) / 12),
+                    fmt_clp(afp_balance_percentiles["p25"] * (float(afp_withdrawal_rate_pct) / 100) / 12),
+                    fmt_clp(afp_balance_percentiles["p50"] * (float(afp_withdrawal_rate_pct) / 100) / 12),
+                    fmt_clp(afp_balance_percentiles["p75"] * (float(afp_withdrawal_rate_pct) / 100) / 12),
+                    fmt_clp(afp_balance_percentiles["p95"] * (float(afp_withdrawal_rate_pct) / 100) / 12),
+                    fmt_clp(afp_fv_real_mean_clp * (float(afp_withdrawal_rate_pct) / 100) / 12),
+                ],
+            }
+        )
+        with st.expander("Ver distribución AFP simulada", expanded=False):
+            st.dataframe(afp_dist_df, width="stretch", hide_index=True)
+        st.caption("Si el ahorro AFP ya está dentro de tus tramos de ahorro patrimonial, evita duplicarlo. La pensión AFP que entra al flujo patrimonial es el escenario seleccionado arriba.")
         panel_end()
 
     with input_tabs[3]:
@@ -2398,9 +2532,20 @@ if submitted:
         "saldo_actual_clp": int(afp_balance_clp),
         "ahorro_mensual_clp": int(afp_monthly_contribution_clp),
         "edad_jubilacion": int(afp_retirement_age),
-        "retorno_real_anual": float(afp_real_return_pct) / 100,
+        "fondo": str(afp_fund),
+        "fuente_retornos": "Superintendencia de Pensiones",
+        "retorno_real_anual": float(afp_return_mean),
+        "desv_est_real_anual": float(afp_return_std),
+        "escenario_pension": str(afp_pension_percentile_label),
+        "percentil_pension": int(afp_selected_percentile),
         "tasa_retiro_anual": float(afp_withdrawal_rate_pct) / 100,
         "saldo_estimado_real_clp": float(afp_fv_real_clp),
+        "saldo_promedio_real_clp": float(afp_fv_real_mean_clp),
+        "saldo_p5_real_clp": float(afp_balance_percentiles["p5"]),
+        "saldo_p25_real_clp": float(afp_balance_percentiles["p25"]),
+        "saldo_p50_real_clp": float(afp_balance_percentiles["p50"]),
+        "saldo_p75_real_clp": float(afp_balance_percentiles["p75"]),
+        "saldo_p95_real_clp": float(afp_balance_percentiles["p95"]),
         "pension_mensual_real_clp": float(afp_monthly_pension_real_clp),
         "pension_mensual_nominal_inicio_clp": float(afp_monthly_pension_nominal_start_clp),
     }
@@ -2614,7 +2759,7 @@ with tab2:
         with afp_cols[2]:
             st.markdown(f"""<div class="definition-card"><b>Pensión nominal inicio</b><br><span>{fmt_clp(afp['pension_mensual_nominal_inicio_clp'])}</span></div>""", unsafe_allow_html=True)
         with afp_cols[3]:
-            st.markdown(f"""<div class="definition-card"><b>Supuestos</b><br><span>retorno real {fmt_pct(afp['retorno_real_anual']*100)} · retiro {fmt_pct(afp['tasa_retiro_anual']*100)}</span></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="definition-card"><b>Supuestos</b><br><span>{afp.get('fondo', 'AFP')} · μ {fmt_pct(afp['retorno_real_anual']*100, 2)} · σ {fmt_pct(afp.get('desv_est_real_anual', 0)*100, 2)} · retiro {fmt_pct(afp['tasa_retiro_anual']*100)}</span></div>""", unsafe_allow_html=True)
     # Se eliminaron las tablas/vistas auxiliares con montos formateados bajo el gráfico de flujos.
     # El detalle numérico queda disponible en el tab "Tablas" y en los CSV descargables.
 
