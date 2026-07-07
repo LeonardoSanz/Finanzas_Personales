@@ -347,3 +347,7 @@ Se agregó un exportador **Excel ejecutivo** pensado para explicar la simulació
 5. **Percentiles**: evolución anual del patrimonio simulado.
 
 También se eliminó de la interfaz la vista/caption auxiliar de banda triangular para no ensuciar la pantalla. La lógica se mantiene: cada tramo usa ahorro esperado ±$500.000 por detrás.
+
+## Ajuste AFP UI
+
+La selección de fondo AFP se dejó como botones horizontales en vez de dropdown/selectbox para evitar que el menú desplegable desordene visualmente la sección dentro de tabs/form en Streamlit Cloud. La lógica de cálculo no cambia: cada escenario AFP se simula con el promedio y desviación estándar real anual del fondo elegido.

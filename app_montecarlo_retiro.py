@@ -2239,13 +2239,27 @@ with st.form("formulario_simulacion"):
         with afp3:
             afp_retirement_age = st.number_input("Edad jubilación AFP", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, value=min(max(60, int(edad_inicial)), EDAD_FINAL_FIJA), step=1)
 
-        afp4, afp5, afp6 = st.columns(3)
+        # Evitamos selectbox aquí porque en algunos despliegues de Streamlit, al abrir el dropdown dentro de tabs/form,
+        # el overlay puede desordenar visualmente el resto de menús. Radio horizontal es más estable y más claro.
+        afp4, afp5 = st.columns([2.4, 1.0])
         with afp4:
-            afp_fund = st.selectbox("Fondo AFP / supuesto SP", list(AFP_RETURN_ASSUMPTIONS.keys()), index=2)
+            afp_fund = st.radio(
+                "Fondo AFP / supuesto SP",
+                list(AFP_RETURN_ASSUMPTIONS.keys()),
+                index=2,
+                horizontal=True,
+                help="Cada simulación toma retornos aleatorios usando el promedio y la desviación estándar del fondo elegido.",
+            )
         with afp5:
-            afp_pension_percentile_label = st.selectbox("Escenario usado como pensión", list(AFP_PERCENTILE_OPTIONS.keys()), index=1)
-        with afp6:
             afp_withdrawal_rate_pct = st.number_input("Tasa retiro AFP anual (%)", min_value=0.0, max_value=10.0, value=3.2, step=0.1)
+
+        afp_pension_percentile_label = st.radio(
+            "Escenario usado como pensión",
+            list(AFP_PERCENTILE_OPTIONS.keys()),
+            index=1,
+            horizontal=True,
+            help="Define qué percentil del saldo AFP simulado se usa para calcular la pensión mensual que entra al flujo.",
+        )
 
         afp_return_mean = float(AFP_RETURN_ASSUMPTIONS[afp_fund]["mean"])
         afp_return_std = float(AFP_RETURN_ASSUMPTIONS[afp_fund]["std"])
