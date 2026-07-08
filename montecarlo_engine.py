@@ -112,6 +112,136 @@ def _sample_truncated_normal(
 
 
 # ============================================================
+# Retornos con regímenes: años normales/malos/crisis + meses variables
+# ============================================================
+
+def _regime_return_parameters(
+    annual_return_mean: float,
+    annual_return_std: float,
+    annual_return_low: float,
+    annual_return_high: float,
+) -> dict:
+    """Parámetros para el modelo de regímenes realistas.
+
+    La rentabilidad esperada sigue siendo nominal anual. El modelo baja esa
+    media/volatilidad a escala mensual, clasifica cada año en normal/malo/crisis
+    y luego permite que dentro de cada año existan meses normales, malos y crisis.
+    Se usa una t-Student escalada para colas pesadas y se recorta por los
+    límites mensuales equivalentes a los truncamientos anuales del usuario.
+    """
+    if annual_return_std <= 0:
+        raise ValueError("annual_return_std debe ser > 0")
+    if annual_return_low <= -1:
+        raise ValueError("annual_return_low no puede ser <= -100%")
+    if not (annual_return_low < annual_return_mean < annual_return_high):
+        raise ValueError("La media anual debe estar entre el mínimo y máximo truncado")
+
+    monthly_mean = (1 + annual_return_mean) ** (1 / 12) - 1
+    monthly_std = annual_return_std / np.sqrt(12)
+    monthly_low = (1 + annual_return_low) ** (1 / 12) - 1
+    monthly_high = (1 + annual_return_high) ** (1 / 12) - 1
+
+    # Probabilidades de años entregadas por el usuario: normal/malo/crisis.
+    annual_probs = np.array([0.75, 0.20, 0.05], dtype=np.float64)
+
+    # Condicional: meses normales/malos/crisis dado el tipo de año.
+    # Permite meses malos dentro de años buenos y meses normales dentro de años malos.
+    monthly_probs_by_year = np.array(
+        [
+            [0.80, 0.15, 0.05],  # año normal
+            [0.45, 0.45, 0.10],  # año malo
+            [0.20, 0.50, 0.30],  # año crisis
+        ],
+        dtype=np.float64,
+    )
+
+    stationary_month_probs = annual_probs @ monthly_probs_by_year
+    p_normal, p_bad, p_crisis = stationary_month_probs
+
+    bad_mean = monthly_mean - 0.85 * monthly_std
+    crisis_mean = monthly_mean - 2.60 * monthly_std
+    normal_mean = (monthly_mean - p_bad * bad_mean - p_crisis * crisis_mean) / max(p_normal, 1e-12)
+
+    means = np.array([normal_mean, bad_mean, crisis_mean], dtype=np.float64)
+    stds = np.array([0.70, 1.45, 3.00], dtype=np.float64) * monthly_std
+
+    return {
+        "monthly_mean_target": monthly_mean,
+        "monthly_std_base": monthly_std,
+        "monthly_low": monthly_low,
+        "monthly_high": monthly_high,
+        "annual_probs": annual_probs,
+        "monthly_probs_by_year": monthly_probs_by_year,
+        "stationary_month_probs": stationary_month_probs,
+        "state_means": means,
+        "state_stds": stds,
+        "student_t_df": 5.0,
+    }
+
+
+def _sample_regime_returns_for_month(
+    rng: np.random.Generator,
+    year_regime: np.ndarray,
+    params: dict,
+) -> np.ndarray:
+    """Genera retornos mensuales para un mes dado el régimen anual de cada path."""
+    n_paths = int(len(year_regime))
+    monthly_states = np.zeros(n_paths, dtype=np.int8)
+    probs = params["monthly_probs_by_year"]
+
+    for regime_code in (0, 1, 2):
+        mask = year_regime == regime_code
+        n = int(np.sum(mask))
+        if n == 0:
+            continue
+        u = rng.random(n)
+        p0, p1, _ = probs[regime_code]
+        states = np.zeros(n, dtype=np.int8)
+        states[u >= p0] = 1
+        states[u >= (p0 + p1)] = 2
+        monthly_states[mask] = states
+
+    means = params["state_means"]
+    stds = params["state_stds"]
+    df = float(params["student_t_df"])
+    # t-Student escalada a varianza aproximadamente 1 para mantener la volatilidad objetivo.
+    shocks = rng.standard_t(df=df, size=n_paths) * np.sqrt((df - 2) / df)
+    returns = means[monthly_states] + stds[monthly_states] * shocks
+    returns = np.clip(returns, params["monthly_low"], params["monthly_high"])
+    return returns.astype(np.float32, copy=False)
+
+
+def _generate_regime_monthly_returns_matrix(
+    rng: np.random.Generator,
+    n_paths: int,
+    years: int,
+    months: int,
+    annual_return_mean: float,
+    annual_return_std: float,
+    annual_return_low: float,
+    annual_return_high: float,
+) -> np.ndarray:
+    """Genera matriz de retornos mensuales con años normales/malos/crisis."""
+    params = _regime_return_parameters(
+        annual_return_mean=annual_return_mean,
+        annual_return_std=annual_return_std,
+        annual_return_low=annual_return_low,
+        annual_return_high=annual_return_high,
+    )
+    years = max(int(years), 1)
+    annual_regimes = rng.choice(
+        np.array([0, 1, 2], dtype=np.int8),
+        size=(n_paths, years),
+        p=params["annual_probs"],
+    )
+    monthly_returns = np.empty((n_paths, months), dtype=np.float32)
+    for t in range(months):
+        year_idx = min(t // 12, years - 1)
+        monthly_returns[:, t] = _sample_regime_returns_for_month(rng, annual_regimes[:, year_idx], params)
+    return monthly_returns
+
+
+# ============================================================
 # Motor Monte Carlo: acumulación + retiro fijo
 # ============================================================
 
@@ -139,7 +269,7 @@ def monte_carlo_accumulation_withdrawal_mm(
     recurring_monthly_events: Optional[tuple[tuple, ...]] = None,
     saving_ranges: Optional[tuple[tuple[float, Optional[float], float, float, float, str], ...]] = None,
     floor_zero: bool = True,
-    return_model: Literal["annual_smooth", "monthly_iid"] = "annual_smooth",
+    return_model: Literal["annual_smooth", "monthly_iid", "regime_realistic"] = "annual_smooth",
     withdrawal_indexed_to_inflation: bool = False,
     inflation_annual: float = 0.0,
     withdrawal_index_base_age: Optional[float] = None,
@@ -197,6 +327,8 @@ def monte_carlo_accumulation_withdrawal_mm(
         monthly_loc_used = np.nan
         monthly_effective_mean = np.nan
         monthly_a = monthly_b = monthly_std = np.nan
+        regime_params = None
+        annual_regimes = None
     elif return_model == "monthly_iid":
         monthly_mean_target = (1 + annual_return_mean) ** (1 / 12) - 1
         monthly_std = annual_return_std / np.sqrt(12)
@@ -213,8 +345,30 @@ def monte_carlo_accumulation_withdrawal_mm(
         effective_mean = (1 + monthly_effective_mean) ** 12 - 1
         annual_returns = None
         monthly_returns_by_year = None
+        regime_params = None
+        annual_regimes = None
+    elif return_model == "regime_realistic":
+        regime_params = _regime_return_parameters(
+            annual_return_mean=annual_return_mean,
+            annual_return_std=annual_return_std,
+            annual_return_low=annual_return_low,
+            annual_return_high=annual_return_high,
+        )
+        annual_regimes = rng.choice(
+            np.array([0, 1, 2], dtype=np.int8),
+            size=(n_paths, years),
+            p=regime_params["annual_probs"],
+        )
+        monthly_loc_used = np.nan
+        monthly_effective_mean = regime_params["monthly_mean_target"]
+        monthly_a = monthly_b = np.nan
+        monthly_std = regime_params["monthly_std_base"]
+        loc_used = np.nan
+        effective_mean = annual_return_mean
+        annual_returns = None
+        monthly_returns_by_year = None
     else:
-        raise ValueError("return_model debe ser 'annual_smooth' o 'monthly_iid'")
+        raise ValueError("return_model debe ser 'annual_smooth', 'monthly_iid' o 'regime_realistic'")
 
     # -----------------------------
     # Aportes extraordinarios: monto positivo = entra plata; negativo = sale plata.
@@ -222,10 +376,15 @@ def monte_carlo_accumulation_withdrawal_mm(
     lump_sums = np.zeros(months, dtype=np.float64)
     if lump_sum_events is not None:
         for month_idx, amount_mm in lump_sum_events:
+            amount_mm = float(amount_mm)
             if amount_mm == 0:
                 continue
-            if 1 <= month_idx <= months:
-                lump_sums[month_idx - 1] += float(amount_mm)
+            try:
+                month_idx_int = int(round(float(month_idx)))
+            except (TypeError, ValueError):
+                raise ValueError(f"El mes {month_idx} no es un índice mensual válido")
+            if 1 <= month_idx_int <= months:
+                lump_sums[month_idx_int - 1] += amount_mm
             else:
                 raise ValueError(f"El mes {month_idx} está fuera del horizonte de simulación")
 
@@ -432,7 +591,7 @@ def monte_carlo_accumulation_withdrawal_mm(
         if return_model == "annual_smooth":
             year_idx = min(t // 12, years - 1)
             r_t = monthly_returns_by_year[:, year_idx].astype(np.float32, copy=False)
-        else:
+        elif return_model == "monthly_iid":
             r_t = truncnorm.rvs(
                 a=monthly_a,
                 b=monthly_b,
@@ -441,6 +600,13 @@ def monte_carlo_accumulation_withdrawal_mm(
                 size=n_paths,
                 random_state=rng,
             ).astype(np.float32, copy=False)
+        else:  # regime_realistic
+            year_idx = min(t // 12, years - 1)
+            r_t = _sample_regime_returns_for_month(
+                rng,
+                annual_regimes[:, year_idx],
+                regime_params,
+            )
         monthly_return_mean[t] = float(np.mean(r_t))
 
         if t < retirement_start_month and saving_max_schedule[t] > 0:
@@ -616,6 +782,11 @@ def monte_carlo_accumulation_withdrawal_mm(
             "saving_ranges": saving_ranges,
             "floor_zero": floor_zero,
             "return_model": return_model,
+            "regime_annual_probs": (0.75, 0.20, 0.05) if return_model == "regime_realistic" else None,
+            "regime_monthly_probs_by_year": (
+                ((0.80, 0.15, 0.05), (0.45, 0.45, 0.10), (0.20, 0.50, 0.30))
+                if return_model == "regime_realistic" else None
+            ),
             "withdrawal_indexed_to_inflation": withdrawal_indexed_to_inflation,
             "inflation_annual": inflation_annual,
             "withdrawal_index_base_age": float(edad_inicial if withdrawal_index_base_age is None else withdrawal_index_base_age),
@@ -863,7 +1034,7 @@ def _simulate_required_capital_by_path_mm(
     annual_return_low: float,
     annual_return_high: float,
     mean_is_effective: bool,
-    return_model: Literal["annual_smooth", "monthly_iid"],
+    return_model: Literal["annual_smooth", "monthly_iid", "regime_realistic"],
     net_end_cashflows_mm: np.ndarray,
     withdrawal_schedule_mm: np.ndarray,
     recurring_plus_lump_mm: np.ndarray,
@@ -939,7 +1110,30 @@ def _simulate_required_capital_by_path_mm(
                 required = np.maximum(0.0, (required - net_end_cashflows_mm[t]) / growth)
         return required
 
-    raise ValueError("return_model debe ser 'annual_smooth' o 'monthly_iid'")
+    if return_model == "regime_realistic":
+        monthly_returns = _generate_regime_monthly_returns_matrix(
+            rng=rng,
+            n_paths=n_paths,
+            years=years,
+            months=months,
+            annual_return_mean=annual_return_mean,
+            annual_return_std=annual_return_std,
+            annual_return_low=annual_return_low,
+            annual_return_high=annual_return_high,
+        )
+        required = np.zeros(n_paths, dtype=np.float64)
+        for t in range(months - 1, -1, -1):
+            growth = 1.0 + monthly_returns[:, t].astype(np.float64, copy=False)
+            if withdrawal_timing == "begin":
+                required = withdrawal_schedule_mm[t] + np.maximum(
+                    0.0,
+                    (required - recurring_plus_lump_mm[t]) / growth,
+                )
+            else:
+                required = np.maximum(0.0, (required - net_end_cashflows_mm[t]) / growth)
+        return required
+
+    raise ValueError("return_model debe ser 'annual_smooth', 'monthly_iid' o 'regime_realistic'")
 
 
 def required_capital_matrix_mm(
@@ -958,7 +1152,7 @@ def required_capital_matrix_mm(
     mean_is_effective: bool = True,
     lump_sum_age_events: Optional[tuple[tuple[float, float], ...]] = None,
     recurring_monthly_events: Optional[tuple[tuple, ...]] = None,
-    return_model: Literal["annual_smooth", "monthly_iid"] = "monthly_iid",
+    return_model: Literal["annual_smooth", "monthly_iid", "regime_realistic"] = "monthly_iid",
     withdrawal_indexed_to_inflation: bool = False,
     inflation_annual: float = 0.0,
     withdrawal_index_base_age: Optional[float] = None,

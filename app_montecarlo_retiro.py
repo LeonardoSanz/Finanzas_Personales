@@ -987,20 +987,6 @@ def plot_cashflow_schedule(result: dict) -> go.Figure:
         )
     )
 
-    fig.add_trace(
-        go.Scatter(
-            x=grouped["edad"],
-            y=grouped["monto_que_saca_del_fondo"],
-            name="Monto que debe salir del fondo",
-            mode="lines+markers",
-            line={"width": 5, "color": COLOR_ORANGE, "dash": "dash"},
-            marker={"size": 8, "color": COLOR_ORANGE},
-            fill="tozeroy",
-            fillcolor="rgba(255, 184, 77, 0.12)",
-            hovertemplate="Edad %{x}<br>Debe salir del fondo $%{customdata:,.0f}<extra></extra>",
-            customdata=grouped["monto_que_saca_del_fondo_abs"],
-        )
-    )
 
     # Los esporádicos son totales anuales, no montos mensuales. Por eso van como diamantes.
     extras = grouped[np.abs(grouped["extra_anual"]) > 1]
@@ -1065,7 +1051,7 @@ def plot_cashflow_schedule(result: dict) -> go.Figure:
         )
 
     fig.update_layout(
-        title="Flujo mensual promedio por edad: entradas, salidas y monto que debe salir del fondo",
+        title="Flujo mensual promedio por edad: entradas y salidas",
         xaxis_title="Edad",
         yaxis_title="Flujo mensual / flujo esporádico anual (CLP)",
         hovermode="x unified",
@@ -1079,7 +1065,7 @@ def plot_cashflow_schedule(result: dict) -> go.Figure:
         y=1.10,
         showarrow=False,
         align="left",
-        text="Barras sobre cero = plata que entra. Barras bajo cero = plata que sale. Línea naranja punteada = diferencia que debe salir del fondo cuando los ingresos no cubren retiros/gastos. Diamantes = flujos únicos del año.",
+        text="Barras sobre cero = plata que entra. Barras bajo cero = plata que sale. Diamantes = flujos únicos del año.",
         font={"size": 12, "color": COLOR_MUTED},
     )
     return apply_plot_theme(fig)
@@ -2045,7 +2031,7 @@ def make_executive_excel_report(
                 ["Inflación anual", fmt_pct(float(inputs.get("inflation_annual", 0)) * 100), "Usada para indexar retiro, ahorro e ingresos marcados como indexados."],
                 ["Retorno anual esperado", fmt_pct(float(inputs.get("annual_return_mean_requested", 0)) * 100), "Media anual de retorno del portafolio."],
                 ["Volatilidad anual", fmt_pct(float(inputs.get("annual_return_std", 0)) * 100), "Riesgo anual simulado."],
-                ["Modelo de retorno", inputs.get("return_model", ""), "Mensual IID captura mejor riesgo de secuencia en retiro."],
+                ["Modelo de retorno", inputs.get("return_model", ""), "Regímenes realistas mezcla años normales, malos y crisis; mensual IID usa shocks independientes."],
                 ["Simulaciones", inputs.get("n_paths"), "Cantidad de caminos Monte Carlo."],
             ],
             columns=["Input", "Valor", "Explicación"],
@@ -2124,9 +2110,9 @@ def make_executive_excel_report(
                 "name": "Monto que debe salir del fondo",
                 "categories": ["02 Flujos", data_first, 0, data_last, 0],
                 "values": ["02 Flujos", data_first, 6, data_last, 6],
-                "line": {"color": "#FFB84D", "width": 3.00, "dash_type": "dash"},
+                "line": {"color": "#FFC857", "width": 2.75, "dash_type": "dash"},
             })
-            chart.set_title({"name": "Flujos anuales y uso del fondo"})
+            chart.set_title({"name": "Flujos anuales"})
             chart.set_x_axis({"name": "Edad"})
             chart.set_y_axis({"name": "CLP nominal"})
             chart.set_legend({"position": "bottom"})
@@ -2711,10 +2697,18 @@ with st.form("formulario_simulacion"):
         panel_end()
 
     with input_tabs[5]:
-        panel_start("Retorno, riesgo y simulación", "El modo mensual IID captura mejor el riesgo de secuencia durante el retiro; el anual suavizado replica mejor el código original.")
+        panel_start("Retorno, riesgo y simulación", "El modelo de regímenes usa retorno nominal esperado, volatilidad anual y años normales/malos/crisis. Dentro de cada año los meses también varían, con colas pesadas.")
         r1, r2, r3, r4, r5 = st.columns(5)
         with r1:
-            return_model_es = st.selectbox("Modelo retorno", ["Mensual IID más realista para retiro", "Anual suavizado como código original"], index=0)
+            return_model_es = st.selectbox(
+                "Modelo retorno",
+                [
+                    "Regímenes realistas: 75% normal / 20% malo / 5% crisis",
+                    "Mensual IID más realista para retiro",
+                    "Anual suavizado como código original",
+                ],
+                index=0,
+            )
         with r2:
             annual_return_mean_pct = st.number_input("Retorno anual esperado (%)", value=10.0, step=0.5)
         with r3:
@@ -2913,7 +2907,12 @@ if submitted:
     recurring_events = tuple(recurring_events_list)
     contribution_timing = "end" if contribution_timing_es == "Fin de mes" else "begin"
     withdrawal_timing = "end"
-    return_model = "monthly_iid" if return_model_es.startswith("Mensual") else "annual_smooth"
+    if return_model_es.startswith("Regímenes"):
+        return_model = "regime_realistic"
+    elif return_model_es.startswith("Mensual"):
+        return_model = "monthly_iid"
+    else:
+        return_model = "annual_smooth"
 
     try:
         with st.spinner("Simulando escenarios..."):
@@ -3038,6 +3037,11 @@ if result["inputs"].get("return_model") == "monthly_iid":
         "Modo mensual IID: cada mes tiene un shock independiente. Es normal que el patrimonio se vea más castigado "
         "que en el modo anual suavizado, porque aparece riesgo de secuencia: malos meses justo al empezar a retirar "
         "pueden dañar mucho más el capital."
+    )
+elif result["inputs"].get("return_model") == "regime_realistic":
+    st.info(
+        "Modo regímenes realistas: cada año se clasifica como normal, malo o crisis con probabilidades 75% / 20% / 5%. "
+        "Dentro de cada año los meses también varían y usan colas pesadas, por lo que pueden aparecer meses malos incluso en años normales."
     )
 
 withdrawal_schedule = result["withdrawal_schedule_mm"]

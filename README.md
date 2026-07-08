@@ -379,8 +379,26 @@ El saldo AFP proyectado se convierte a pensión mediante un **factor de conversi
 ## Últimos ajustes
 
 - El botón del Excel ejecutivo queda como descarga única, grande y ubicada bajo la matriz FIRE realista.
-- El gráfico de flujos ahora destaca la línea “Monto que debe salir del fondo”, es decir, la diferencia que el patrimonio invertido debe financiar cuando ingresos/ahorros no cubren retiros y egresos antes del retorno.
 
 ## Ajuste de ahorro realista
 
 Se reemplazó la distribución triangular por una mezcla asimétrica conservadora. Si el usuario ingresa un ahorro objetivo de $3.000.000, la mayoría de los meses se simula entre $2.500.000 y $3.000.000; algunos meses malos caen bajo $2.500.000 y solo pocos meses muy buenos superan el objetivo hasta $3.500.000. Esto evita sobreestimar meses buenos imposibles y refleja que en la práctica es más probable ahorrar menos que superar el objetivo.
+
+
+### Nota Excel
+
+El reporte ejecutivo incluye en el gráfico de flujos la línea **Monto que debe salir del fondo**. En Streamlit se mantiene el gráfico más limpio, sin esa línea adicional.
+
+## Ajuste de retornos realistas
+
+Se agregó un nuevo modo de retorno por defecto: **Regímenes realistas**.
+
+La rentabilidad sigue siendo **nominal**, para mantener la lectura simple para clientes. El usuario ingresa retorno anual esperado y volatilidad anual como antes. El motor ahora clasifica cada año en:
+
+- 75% año normal.
+- 20% año malo.
+- 5% año crisis.
+
+Dentro de cada año los meses también varían. En un año normal puede haber meses malos y, en un año crisis, también puede haber algunos meses normales. Además, los retornos mensuales usan colas pesadas mediante una t-Student escalada y se respetan los límites de retorno mínimo/máximo definidos por el usuario.
+
+Esto busca capturar mejor riesgo de secuencia, agrupación de malos retornos y eventos de cola sin hacer más confusa la interfaz.
