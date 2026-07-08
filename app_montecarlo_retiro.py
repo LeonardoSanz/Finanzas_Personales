@@ -1731,6 +1731,18 @@ def nominal_to_today_clp(value_clp: float | int, age: float | int, inputs: dict)
     return float(value_clp) / ((1 + inflation) ** years)
 
 
+def today_to_nominal_clp(value_clp: float | int, age: float | int, inputs: dict) -> float:
+    """Lleva un monto en pesos de hoy a pesos nominales de cierta edad."""
+    if value_clp is None or (isinstance(value_clp, float) and np.isnan(value_clp)):
+        return np.nan
+    inflation = float(inputs.get("inflation_annual", 0.0))
+    base_age = float(inputs.get("edad_inicial", age))
+    years = float(age) - base_age
+    if inflation <= -1:
+        return float(value_clp)
+    return float(value_clp) * ((1 + inflation) ** years)
+
+
 def _event_priority(event_types: list[str]) -> str:
     priority = ["agotamiento", "retiro", "afp", "arriendo", "esporadico", "hijos", "ahorro", "flujo", "ninguno"]
     for p in priority:
@@ -1962,6 +1974,7 @@ def lump_age_events_to_monthly_from_start(lump_age_events: tuple | None, start_a
     return tuple(events)
 
 
+
 def run_retirement_age_4pct_sensitivity(
     *,
     base_result: dict,
@@ -1972,23 +1985,32 @@ def run_retirement_age_4pct_sensitivity(
     n_paths: int,
     withdrawal_rate_annual: float = 0.04,
 ) -> pd.DataFrame:
-    """Evalúa todas las edades de jubilación con regla 4% sobre patrimonio P50 de esa edad.
+    """Calcula retiro sostenible por edad de jubilación.
 
-    La tabla muestra el retiro nominal de la edad evaluada y su equivalente en pesos de hoy.
-    La supervivencia se estima desde esa edad hasta los 90 usando ese retiro inicial, indexado
-    desde la misma edad si el escenario principal tiene indexación activa.
+    Esta función reemplaza la antigua sensibilidad puramente basada en la regla del 4%.
+    Para cada edad posible de jubilación, busca por bisección el mayor retiro mensual
+    expresado en pesos de hoy que permite llegar a los 90 años con al menos el umbral
+    objetivo de éxito. El benchmark 4% se mantiene solo como referencia secundaria.
     """
     inputs = base_result["inputs"]
     edad_inicial = int(inputs.get("edad_inicial"))
     edad_final = int(inputs.get("edad_final"))
     planned_age = int(inputs.get("edad_inicio_retiro"))
+    target_success_pct = float(st.session_state.get("mc_fire_analysis_target_success_pct", 90.0))
+    target_success = target_success_pct / 100.0
+    desired_monthly_today_clp = float(inputs.get("withdrawal_monthly_mm", 0.0)) * 1_000_000
     rows = []
-    n_paths = int(max(1000, n_paths))
 
-    for age in range(edad_inicial, edad_final):
+    # La tabla evalúa todas las edades, por lo que se acota el número de simulaciones
+    # para mantener la app usable en Streamlit Cloud. La matriz FIRE principal puede
+    # usar más paths en edades específicas.
+    n_paths = int(max(700, min(int(n_paths), 2_500)))
+    seed_base = int(inputs.get("seed", 123))
+
+    def simulate_candidate(age: int, withdrawal_today_clp: float, seed_offset: int) -> dict:
+        """Simula el escenario completo retirándose a una edad candidata."""
         candidate_savings = adapt_saving_ranges_for_retirement_age(saving_ranges, planned_age, age)
-        # 1) Simula acumulación hasta esa edad sin retiro, para estimar patrimonio disponible.
-        accum = monte_carlo_accumulation_withdrawal_mm(
+        return monte_carlo_accumulation_withdrawal_mm(
             edad_inicial=edad_inicial,
             edad_final=edad_final,
             edad_inicio_retiro=age,
@@ -2001,79 +2023,90 @@ def run_retirement_age_4pct_sensitivity(
             monthly_saving_min_mm=0.0,
             monthly_saving_mode_mm=0.0,
             monthly_saving_max_mm=0.0,
-            withdrawal_monthly_mm=0.0,
+            withdrawal_monthly_mm=clp_to_mm(withdrawal_today_clp),
             contribution_timing=str(inputs.get("contribution_timing", "end")),
             withdrawal_timing=str(inputs.get("withdrawal_timing", "end")),
             target_mm=None,
-            seed=int(inputs.get("seed", 123)) + 51000 + age * 29,
+            seed=seed_base + 73000 + age * 101 + int(seed_offset),
             mean_is_effective=bool(inputs.get("mean_is_effective", True)),
             lump_sum_events=lump_events_monthly,
             recurring_monthly_events=recurring_events,
             saving_ranges=candidate_savings,
             floor_zero=bool(inputs.get("floor_zero", True)),
             return_model=str(inputs.get("return_model", "monthly_iid")),
-            withdrawal_indexed_to_inflation=False,
+            withdrawal_indexed_to_inflation=bool(inputs.get("withdrawal_indexed_to_inflation", True)),
             inflation_annual=float(inputs.get("inflation_annual", 0.0)),
+            # El retiro probado está en pesos de hoy, por lo que se indexa desde la edad actual
+            # hasta la edad evaluada y luego continúa indexándose hasta los 90.
             withdrawal_index_base_age=float(inputs.get("edad_inicial", edad_inicial)),
             savings_indexed_to_inflation=bool(inputs.get("savings_indexed_to_inflation", False)),
         )
-        capital_p50_mm = float(np.percentile(accum["wealth_at_retirement_mm"], 50))
-        capital_p50_clp = capital_p50_mm * 1_000_000
-        retiro_anual_nominal_clp = capital_p50_clp * float(withdrawal_rate_annual)
-        retiro_mensual_nominal_clp = retiro_anual_nominal_clp / 12
-        retiro_anual_hoy_clp = nominal_to_today_clp(retiro_anual_nominal_clp, age, inputs)
-        retiro_mensual_hoy_clp = retiro_anual_hoy_clp / 12
 
-        # 2) Simula desde esa edad hasta 90 con ese retiro inicial.
-        future_lumps = lump_age_events_to_monthly_from_start(lump_age_events, age, edad_final)
-        survival = monte_carlo_accumulation_withdrawal_mm(
-            edad_inicial=age,
-            edad_final=edad_final,
-            edad_inicio_retiro=age,
-            n_paths=n_paths,
-            initial_capital_mm=capital_p50_mm,
-            annual_return_mean=float(inputs["annual_return_mean_requested"]),
-            annual_return_std=float(inputs["annual_return_std"]),
-            annual_return_low=float(inputs["annual_return_low"]),
-            annual_return_high=float(inputs["annual_return_high"]),
-            monthly_saving_min_mm=0.0,
-            monthly_saving_mode_mm=0.0,
-            monthly_saving_max_mm=0.0,
-            withdrawal_monthly_mm=clp_to_mm(retiro_mensual_nominal_clp),
-            contribution_timing=str(inputs.get("contribution_timing", "end")),
-            withdrawal_timing=str(inputs.get("withdrawal_timing", "end")),
-            target_mm=None,
-            seed=int(inputs.get("seed", 123)) + 61000 + age * 31,
-            mean_is_effective=bool(inputs.get("mean_is_effective", True)),
-            lump_sum_events=future_lumps,
-            recurring_monthly_events=recurring_events,
-            saving_ranges=tuple(),
-            floor_zero=bool(inputs.get("floor_zero", True)),
-            return_model=str(inputs.get("return_model", "monthly_iid")),
-            withdrawal_indexed_to_inflation=bool(inputs.get("withdrawal_indexed_to_inflation", True)),
-            inflation_annual=float(inputs.get("inflation_annual", 0.0)),
-            withdrawal_index_base_age=float(age),
-            savings_indexed_to_inflation=False,
-        )
-        success_pct = float(survival.get("prob_no_ruin", np.nan) * 100)
-        if success_pct >= 90:
-            estado = "Aguanta"
-        elif success_pct >= 70:
-            estado = "Frágil"
+    for age in range(edad_inicial, edad_final):
+        # 1) Simulación sin retiro para estimar patrimonio disponible al jubilar.
+        zero = simulate_candidate(age, 0.0, seed_offset=0)
+        wealth_ret = np.asarray(zero.get("wealth_at_retirement_mm", []), dtype=float)
+        capital_p50_mm = float(np.percentile(wealth_ret, 50)) if wealth_ret.size else 0.0
+        capital_p50_clp = capital_p50_mm * 1_000_000
+        capital_p50_today_clp = nominal_to_today_clp(capital_p50_clp, age, inputs)
+
+        retiro_4pct_anual_nominal_clp = capital_p50_clp * float(withdrawal_rate_annual)
+        retiro_4pct_mensual_nominal_clp = retiro_4pct_anual_nominal_clp / 12
+        retiro_4pct_mensual_hoy_clp = nominal_to_today_clp(retiro_4pct_mensual_nominal_clp, age, inputs)
+
+        # 2) Búsqueda del retiro mensual máximo en pesos de hoy.
+        #    El límite superior crece si el caso todavía sobrevive, para no quedar corto.
+        high = max(float(desired_monthly_today_clp) * 1.8, float(retiro_4pct_mensual_hoy_clp) * 2.0, 1_000_000.0)
+        low = 0.0
+        high_result = simulate_candidate(age, high, seed_offset=77)
+        high_success = float(high_result.get("prob_no_ruin", np.nan))
+        expand_count = 0
+        while np.isfinite(high_success) and high_success >= target_success and expand_count < 5:
+            high *= 1.8
+            high_result = simulate_candidate(age, high, seed_offset=77)
+            high_success = float(high_result.get("prob_no_ruin", np.nan))
+            expand_count += 1
+
+        best_withdrawal_today = 0.0
+        best_result = simulate_candidate(age, 0.0, seed_offset=77)
+        # Si aun con retiro cero el plan falla, queda en cero y se marca como no viable.
+        zero_success = float(best_result.get("prob_no_ruin", np.nan))
+        if np.isfinite(zero_success) and zero_success >= target_success:
+            for it in range(8):
+                mid = 0.5 * (low + high)
+                sim_mid = simulate_candidate(age, mid, seed_offset=77)
+                success_mid = float(sim_mid.get("prob_no_ruin", np.nan))
+                if np.isfinite(success_mid) and success_mid >= target_success:
+                    best_withdrawal_today = mid
+                    best_result = sim_mid
+                    low = mid
+                else:
+                    high = mid
+
+        sustainable_success_pct = float(best_result.get("prob_no_ruin", np.nan) * 100)
+        first_nominal_clp = today_to_nominal_clp(best_withdrawal_today, age, inputs)
+        desired_gap_clp = best_withdrawal_today - desired_monthly_today_clp
+        if best_withdrawal_today >= desired_monthly_today_clp:
+            estado = "Alcanza"
+        elif best_withdrawal_today >= 0.85 * desired_monthly_today_clp:
+            estado = "Cerca"
         else:
-            estado = "No aguanta"
+            estado = "No alcanza"
+
         rows.append(
             {
                 "Edad jubilación": int(age),
                 "Año calendario": datetime.now().year + (int(age) - edad_inicial),
                 "Patrimonio P50 nominal": capital_p50_clp,
-                "Patrimonio P50 pesos de hoy": nominal_to_today_clp(capital_p50_clp, age, inputs),
-                "Retiro anual 4% nominal": retiro_anual_nominal_clp,
-                "Retiro mensual 4% nominal": retiro_mensual_nominal_clp,
-                "Retiro anual 4% pesos de hoy": retiro_anual_hoy_clp,
-                "Retiro mensual 4% pesos de hoy": retiro_mensual_hoy_clp,
-                "Prob. no agotar hasta 90": success_pct,
-                "Edad mediana agotamiento si falla": survival.get("median_ruin_age", np.nan),
+                "Patrimonio P50 pesos de hoy": capital_p50_today_clp,
+                "Retiro sostenible mensual pesos de hoy": best_withdrawal_today,
+                "Primer retiro sostenible nominal": first_nominal_clp,
+                "Retiro deseado mensual pesos de hoy": desired_monthly_today_clp,
+                "Brecha vs retiro deseado": desired_gap_clp,
+                "Retiro mensual 4% pesos de hoy": retiro_4pct_mensual_hoy_clp,
+                "Retiro mensual 4% nominal": retiro_4pct_mensual_nominal_clp,
+                "Prob. no agotar hasta 90": sustainable_success_pct,
+                "Edad mediana agotamiento si falla": best_result.get("median_ruin_age", np.nan),
                 "Estado": estado,
             }
         )
@@ -2081,16 +2114,35 @@ def run_retirement_age_4pct_sensitivity(
 
 
 def format_retirement_4pct_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
+    """Formatea la tabla de retiro sostenible por edad para pantalla."""
     if df is None or df.empty:
         return pd.DataFrame()
     display = df.copy()
+    preferred_order = [
+        "Edad jubilación",
+        "Año calendario",
+        "Estado",
+        "Patrimonio P50 pesos de hoy",
+        "Patrimonio P50 nominal",
+        "Retiro sostenible mensual pesos de hoy",
+        "Primer retiro sostenible nominal",
+        "Retiro deseado mensual pesos de hoy",
+        "Brecha vs retiro deseado",
+        "Retiro mensual 4% pesos de hoy",
+        "Retiro mensual 4% nominal",
+        "Prob. no agotar hasta 90",
+        "Edad mediana agotamiento si falla",
+    ]
+    display = display[[c for c in preferred_order if c in display.columns]]
     money_cols = [
         "Patrimonio P50 nominal",
         "Patrimonio P50 pesos de hoy",
-        "Retiro anual 4% nominal",
-        "Retiro mensual 4% nominal",
-        "Retiro anual 4% pesos de hoy",
+        "Retiro sostenible mensual pesos de hoy",
+        "Primer retiro sostenible nominal",
+        "Retiro deseado mensual pesos de hoy",
+        "Brecha vs retiro deseado",
         "Retiro mensual 4% pesos de hoy",
+        "Retiro mensual 4% nominal",
     ]
     for col in money_cols:
         if col in display.columns:
@@ -2108,6 +2160,9 @@ def style_retirement_4pct_sensitivity(df: pd.DataFrame):
         return display
     estados = list(df.get("Estado", pd.Series([""] * len(df))))
     colors = {
+        "Alcanza": "background-color: rgba(48, 209, 88, 0.22); color: #FFFFFF;",
+        "Cerca": "background-color: rgba(255, 209, 102, 0.24); color: #FFFFFF;",
+        "No alcanza": "background-color: rgba(255, 92, 122, 0.26); color: #FFFFFF;",
         "Aguanta": "background-color: rgba(48, 209, 88, 0.22); color: #FFFFFF;",
         "Frágil": "background-color: rgba(255, 209, 102, 0.24); color: #FFFFFF;",
         "No aguanta": "background-color: rgba(255, 92, 122, 0.26); color: #FFFFFF;",
@@ -2117,7 +2172,6 @@ def style_retirement_4pct_sensitivity(df: pd.DataFrame):
         style = colors.get(state, "")
         return [style for _ in row]
     return display.style.apply(row_style, axis=1)
-
 
 def make_display_table(tabla: pd.DataFrame) -> pd.DataFrame:
     display = tabla.copy()
@@ -2661,10 +2715,10 @@ def make_executive_excel_report(
         ws.merge_range(r, 1, r + 1, 8, "Los montos nominales corresponden a pesos de cada año/edad. La columna en pesos de hoy deflacta por la inflación anual del escenario para facilitar la comparación temporal.", fmt_note)
 
         # ----------------------------------------------------
-        # 06 Jubilación 4%
+        # 06 Retiro sostenible
         # ----------------------------------------------------
-        ws = add_sheet("06 Jubilacion 4pct")
-        write_title(ws, "Sensibilidad por edad de jubilación con regla 4%", "Para cada edad se estima el patrimonio P50 disponible, el retiro inicial equivalente al 4% anual y su monto nominal y en pesos de hoy.")
+        ws = add_sheet("06 Retiro sostenible")
+        write_title(ws, "Retiro sostenible por edad de jubilación", "Para cada edad se busca por simulación el retiro mensual máximo en pesos de hoy que permite llegar a los 90 con la probabilidad objetivo. La regla 4% queda solo como benchmark.")
         if not retirement_4pct.empty:
             ret4 = retirement_4pct.copy()
             if "Prob. no agotar hasta 90" in ret4.columns:
@@ -2677,16 +2731,17 @@ def make_executive_excel_report(
                 title="Todas las edades evaluadas",
                 money_cols={
                     "Patrimonio P50 nominal", "Patrimonio P50 pesos de hoy",
-                    "Retiro anual 4% nominal", "Retiro mensual 4% nominal",
-                    "Retiro anual 4% pesos de hoy", "Retiro mensual 4% pesos de hoy"
+                    "Retiro sostenible mensual pesos de hoy", "Primer retiro sostenible nominal",
+                    "Retiro deseado mensual pesos de hoy", "Brecha vs retiro deseado",
+                    "Retiro mensual 4% pesos de hoy", "Retiro mensual 4% nominal"
                 },
                 pct_cols={"Probabilidad no agotar"},
                 int_cols={"Edad jubilación", "Año calendario"},
             )
             ws.write(r, 0, "Interpretación", fmt_header)
-            ws.merge_range(r, 1, r + 2, 8, "Esta tabla no reemplaza el escenario principal de retiro fijo. Es una sensibilidad intuitiva: si te jubilaras a cada edad, calcula cuánto sería 4% anual del patrimonio P50 estimado y evalúa si ese retiro inicial, indexado desde esa edad, sobrevive hasta los 90.", fmt_note)
+            ws.merge_range(r, 1, r + 2, 8, "La columna principal es el retiro sostenible mensual en pesos de hoy: el mayor monto real que, según la simulación, permite llegar a los 90 con la probabilidad objetivo. El 4% se mantiene solo como referencia intuitiva y no controla la decisión.", fmt_note)
         else:
-            ws.write(4, 0, "Calcula FIRE / Coast / Matriz en la app para generar esta sensibilidad.", fmt_note)
+            ws.write(4, 0, "Calcula FIRE / Coast / Matriz en la app para generar la tabla de retiro sostenible.", fmt_note)
 
         # ----------------------------------------------------
         # 07 Percentiles
@@ -3782,6 +3837,8 @@ with tab6:
                     lump_events_monthly=lump_events_monthly_for_scan,
                 )
 
+                # Umbral usado por la tabla de retiro sostenible por edad.
+                st.session_state["mc_fire_analysis_target_success_pct"] = float(fire_target_success_pct)
                 sensitivity_4pct_df = run_retirement_age_4pct_sensitivity(
                     base_result=result,
                     saving_ranges=saving_ranges_for_scan,
@@ -3898,15 +3955,15 @@ with tab6:
         st.plotly_chart(plot_realistic_required_capital_heatmap(realistic_matrix_clp), width="stretch")
         st.dataframe(format_realistic_matrix_clp(realistic_matrix_clp), width="stretch")
 
-        st.markdown("#### Sensibilidad por edad de jubilación con regla 4%")
+        st.markdown("#### Retiro sostenible por edad de jubilación")
         st.caption(
-            "Evalúa todas las edades desde tu edad actual hasta 89. Para cada edad, estima el patrimonio P50 que tendrías al jubilar, calcula un retiro inicial de 4% anual sobre ese patrimonio y muestra tanto el monto nominal de esa época como su equivalente en pesos de hoy. La supervivencia se estima con ese retiro inicial indexado desde la edad evaluada."
+            "Evalúa todas las edades desde tu edad actual hasta 89. Para cada edad busca por simulación el retiro mensual máximo —expresado en pesos de hoy— que permitiría llegar a los 90 con la probabilidad objetivo. También muestra el primer retiro nominal de esa edad y una referencia secundaria basada en 4%."
         )
         sensitivity_4pct_df = analysis.get("retirement_4pct_sensitivity", pd.DataFrame())
         if sensitivity_4pct_df is None or sensitivity_4pct_df.empty:
-            st.info("La sensibilidad 4% no está disponible todavía. Vuelve a calcular FIRE / Coast / matriz.")
+            st.info("La tabla de retiro sostenible no está disponible todavía. Vuelve a calcular FIRE / Coast / matriz.")
         else:
-            st.dataframe(style_retirement_4pct_sensitivity(sensitivity_4pct_df), width="stretch", hide_index=True)
+            st.dataframe(style_retirement_4pct_sensitivity(sensitivity_4pct_df), width="stretch", hide_index=True, height=650)
 
         excel_fire_report = make_executive_excel_report(
             result,

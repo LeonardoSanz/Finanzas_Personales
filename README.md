@@ -411,3 +411,7 @@ Se agregó dentro de la pestaña FIRE / Coast / Matriz:
 - Sensibilidad por todas las edades de jubilación usando regla 4% anual sobre patrimonio P50.
 - La sensibilidad muestra retiro mensual/anual en pesos nominales de la edad y en pesos de hoy.
 - El reporte Excel ejecutivo incorpora el calendario y la sensibilidad 4%.
+
+## Actualización: retiro sostenible por edad
+
+La sección FIRE / Coast / Matriz incorpora una tabla de retiro sostenible por edad de jubilación. Para cada edad desde la edad inicial hasta 89 años, la app busca por simulación el retiro mensual máximo expresado en pesos de hoy que permite llegar a los 90 años con la probabilidad objetivo de éxito. El primer retiro nominal se calcula indexando ese monto desde la edad actual hasta la edad evaluada. La regla del 4% queda solo como benchmark secundario.
