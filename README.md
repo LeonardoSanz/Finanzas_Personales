@@ -402,3 +402,12 @@ La rentabilidad sigue siendo **nominal**, para mantener la lectura simple para c
 Dentro de cada año los meses también varían. En un año normal puede haber meses malos y, en un año crisis, también puede haber algunos meses normales. Además, los retornos mensuales usan colas pesadas mediante una t-Student escalada y se respetan los límites de retorno mínimo/máximo definidos por el usuario.
 
 Esto busca capturar mejor riesgo de secuencia, agrupación de malos retornos y eventos de cola sin hacer más confusa la interfaz.
+
+## Actualización: calendario y sensibilidad por edad
+
+Se agregó dentro de la pestaña FIRE / Coast / Matriz:
+
+- Calendario anual del plan con eventos coloreables por edad.
+- Sensibilidad por todas las edades de jubilación usando regla 4% anual sobre patrimonio P50.
+- La sensibilidad muestra retiro mensual/anual en pesos nominales de la edad y en pesos de hoy.
+- El reporte Excel ejecutivo incorpora el calendario y la sensibilidad 4%.

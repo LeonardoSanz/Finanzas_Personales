@@ -1718,6 +1718,407 @@ def run_minimum_saving_calculator(
 
 
 
+
+def nominal_to_today_clp(value_clp: float | int, age: float | int, inputs: dict) -> float:
+    """Deflacta un monto nominal de cierta edad a pesos de hoy."""
+    if value_clp is None or (isinstance(value_clp, float) and np.isnan(value_clp)):
+        return np.nan
+    inflation = float(inputs.get("inflation_annual", 0.0))
+    base_age = float(inputs.get("edad_inicial", age))
+    years = float(age) - base_age
+    if inflation <= -1:
+        return float(value_clp)
+    return float(value_clp) / ((1 + inflation) ** years)
+
+
+def _event_priority(event_types: list[str]) -> str:
+    priority = ["agotamiento", "retiro", "afp", "arriendo", "esporadico", "hijos", "ahorro", "flujo", "ninguno"]
+    for p in priority:
+        if p in event_types:
+            return p
+    return "ninguno"
+
+
+def build_event_timeline_table(
+    result: dict,
+    tabla: pd.DataFrame,
+    saving_ranges_df: pd.DataFrame | None,
+    recurring_df: pd.DataFrame | None,
+    lump_df: pd.DataFrame | None,
+    afp_info: dict | None,
+) -> pd.DataFrame:
+    """Construye un calendario anual coloreable con hitos del plan."""
+    inputs = result["inputs"]
+    edad_inicial = int(inputs.get("edad_inicial", 0))
+    edad_retiro = int(inputs.get("edad_inicio_retiro", edad_inicial))
+    current_year = datetime.now().year
+    out_rows = []
+
+    saving_events: dict[int, list[str]] = {}
+    if saving_ranges_df is not None and not saving_ranges_df.empty:
+        for _, row in saving_ranges_df.iterrows():
+            if pd.isna(row.get("edad_inicio")):
+                continue
+            age = int(round(float(row.get("edad_inicio"))))
+            desc = str(row.get("descripcion", "Tramo de ahorro"))
+            amount = parse_clp_value(row.get("ahorro_esperado_clp", 0)) if "ahorro_esperado_clp" in saving_ranges_df.columns else 0
+            label = f"Cambio ahorro: {desc}"
+            if amount:
+                label += f" ({fmt_clp(amount)}/mes objetivo)"
+            saving_events.setdefault(age, []).append(label)
+
+    lump_events: dict[int, list[str]] = {}
+    if lump_df is not None and not lump_df.empty:
+        for _, row in lump_df.iterrows():
+            if pd.isna(row.get("edad_evento")):
+                continue
+            amount = parse_clp_value(row.get("monto_clp", 0))
+            if amount == 0:
+                continue
+            age = int(round(float(row.get("edad_evento"))))
+            tipo = str(row.get("tipo", "Ingreso"))
+            sign_txt = "+" if tipo == "Ingreso" else "-"
+            desc = str(row.get("descripcion", "Evento único"))
+            lump_events.setdefault(age, []).append(f"{tipo} único: {desc} ({sign_txt}{fmt_clp(amount)})")
+
+    recurring_events: dict[int, list[tuple[str, str]]] = {}
+    if recurring_df is not None and not recurring_df.empty:
+        for _, row in recurring_df.iterrows():
+            if pd.isna(row.get("edad_inicio")):
+                continue
+            amount = parse_clp_value(row.get("monto_mensual_clp", 0))
+            if amount == 0:
+                continue
+            age = int(round(float(row.get("edad_inicio"))))
+            tipo = str(row.get("tipo", "Ingreso"))
+            desc = str(row.get("descripcion", "Flujo recurrente"))
+            indexed = " indexado" if bool(row.get("indexar_inflacion", False)) else ""
+            label = f"Comienza {tipo.lower()} recurrente: {desc} ({fmt_clp(amount)}/mes{indexed})"
+            event_kind = "arriendo" if "arriendo" in desc.lower() or tipo == "Ingreso" else "flujo"
+            recurring_events.setdefault(age, []).append((label, event_kind))
+
+    afp_age = None
+    if afp_info and afp_info.get("enabled"):
+        try:
+            afp_age = int(round(float(afp_info.get("edad_jubilacion"))))
+        except Exception:
+            afp_age = None
+
+    median_ruin_age = result.get("median_ruin_age", np.nan)
+    ruin_age_marker = None if pd.isna(median_ruin_age) else int(round(float(median_ruin_age)))
+
+    tabla_sorted = tabla.sort_values("edad").reset_index(drop=True)
+    for i, row in tabla_sorted.iterrows():
+        age = int(row["edad"])
+        year = current_year + (age - edad_inicial)
+        p50_start = float(row.get("p50_mediana_mm", 0.0)) * 1_000_000
+        if i + 1 < len(tabla_sorted):
+            p50_end = float(tabla_sorted.iloc[i + 1].get("p50_mediana_mm", 0.0)) * 1_000_000
+        else:
+            p50_end = p50_start
+        retiro_nominal = float(row.get("retiro_prom_mensual_mm", 0.0)) * 1_000_000
+        retiro_hoy = nominal_to_today_clp(retiro_nominal, age, inputs) if retiro_nominal else 0.0
+        ingresos_rec = float(row.get("ingreso_recurrente_prom_mensual_mm", 0.0)) * 1_000_000
+        egresos_rec = float(row.get("egreso_recurrente_prom_mensual_mm", 0.0)) * 1_000_000
+        extra_anual = float(row.get("aporte_extra_anual_mm", 0.0)) * 1_000_000
+
+        event_texts: list[str] = []
+        event_types: list[str] = []
+        if age in saving_events:
+            event_texts.extend(saving_events[age])
+            # Si el usuario etiqueta hijos en la descripción, se pinta como hito familiar.
+            if any("hij" in x.lower() for x in saving_events[age]):
+                event_types.append("hijos")
+            else:
+                event_types.append("ahorro")
+        if age in lump_events:
+            event_texts.extend(lump_events[age])
+            event_types.append("esporadico")
+        if age == edad_retiro:
+            event_texts.append("Inicio del retiro elegido")
+            event_types.append("retiro")
+        if age in recurring_events:
+            for label, kind in recurring_events[age]:
+                event_texts.append(label)
+                event_types.append(kind)
+        if afp_age is not None and age == afp_age:
+            pension = afp_info.get("pension_mensual_real_clp", np.nan)
+            event_texts.append(f"Inicio pensión AFP estimada ({fmt_clp(pension)} de hoy)")
+            event_types.append("afp")
+        if ruin_age_marker is not None and age == ruin_age_marker:
+            event_texts.append("Edad mediana de agotamiento si el plan falla")
+            event_types.append("agotamiento")
+
+        event_type = _event_priority(event_types)
+        out_rows.append(
+            {
+                "Año": year,
+                "Edad": age,
+                "Patrimonio P50 inicio": p50_start,
+                "Patrimonio P50 fin": p50_end,
+                "Retiro mensual nominal": retiro_nominal,
+                "Retiro mensual en pesos de hoy": retiro_hoy,
+                "Ingresos recurrentes mensuales": ingresos_rec,
+                "Egresos recurrentes mensuales": egresos_rec,
+                "Flujo único anual": extra_anual,
+                "Evento": " | ".join(event_texts) if event_texts else "",
+                "Tipo evento": event_type,
+            }
+        )
+    return pd.DataFrame(out_rows)
+
+
+def format_event_timeline_table(timeline: pd.DataFrame) -> pd.DataFrame:
+    if timeline is None or timeline.empty:
+        return pd.DataFrame()
+    display = timeline.copy()
+    money_cols = [
+        "Patrimonio P50 inicio",
+        "Patrimonio P50 fin",
+        "Retiro mensual nominal",
+        "Retiro mensual en pesos de hoy",
+        "Ingresos recurrentes mensuales",
+        "Egresos recurrentes mensuales",
+        "Flujo único anual",
+    ]
+    for col in money_cols:
+        if col in display.columns:
+            display[col] = display[col].apply(fmt_clp)
+    if "Tipo evento" in display.columns:
+        display = display.drop(columns=["Tipo evento"])
+    return display
+
+
+def style_event_timeline_table(timeline: pd.DataFrame):
+    display = format_event_timeline_table(timeline)
+    if timeline is None or timeline.empty:
+        return display
+    color_map = {
+        "hijos": "background-color: rgba(255, 209, 102, 0.28); color: #FFFFFF;",
+        "ahorro": "background-color: rgba(255, 209, 102, 0.16); color: #FFFFFF;",
+        "esporadico": "background-color: rgba(255, 184, 107, 0.26); color: #FFFFFF;",
+        "retiro": "background-color: rgba(0, 209, 255, 0.24); color: #FFFFFF;",
+        "arriendo": "background-color: rgba(48, 209, 88, 0.22); color: #FFFFFF;",
+        "afp": "background-color: rgba(183, 140, 255, 0.28); color: #FFFFFF;",
+        "flujo": "background-color: rgba(139, 61, 255, 0.16); color: #FFFFFF;",
+        "agotamiento": "background-color: rgba(255, 92, 122, 0.32); color: #FFFFFF;",
+        "ninguno": "",
+    }
+    types = list(timeline.get("Tipo evento", pd.Series(["ninguno"] * len(display))))
+
+    def row_style(row):
+        kind = types[row.name] if row.name < len(types) else "ninguno"
+        style = color_map.get(kind, "")
+        return [style for _ in row]
+
+    return display.style.apply(row_style, axis=1)
+
+
+def adapt_saving_ranges_for_retirement_age(saving_ranges: tuple | None, planned_retirement_age: float, candidate_retirement_age: float) -> tuple:
+    """Hace que los tramos que terminaban en la edad de retiro elegida terminen en la edad candidata."""
+    if not saving_ranges:
+        return tuple()
+    out = []
+    for item in saving_ranges:
+        if len(item) < 5:
+            continue
+        start_age, end_age, min_mm, mode_mm, max_mm = item[:5]
+        description = item[5] if len(item) >= 6 else "Tramo ahorro"
+        if start_age is None:
+            continue
+        start = float(start_age)
+        if start >= float(candidate_retirement_age):
+            continue
+        if end_age is None or (isinstance(end_age, float) and np.isnan(end_age)):
+            end = float(candidate_retirement_age)
+        else:
+            end = float(end_age)
+            if abs(end - float(planned_retirement_age)) < 1e-8:
+                end = float(candidate_retirement_age)
+            else:
+                end = min(end, float(candidate_retirement_age))
+        if end <= start:
+            continue
+        out.append((start, end, float(min_mm), float(mode_mm), float(max_mm), str(description)))
+    return tuple(out)
+
+
+def lump_age_events_to_monthly_from_start(lump_age_events: tuple | None, start_age: int, edad_final: int) -> tuple[tuple[int, float], ...]:
+    events = []
+    if not lump_age_events:
+        return tuple(events)
+    for age, amount_mm in lump_age_events:
+        try:
+            age_f = float(age)
+            amount_f = float(amount_mm)
+        except Exception:
+            continue
+        if amount_f == 0 or age_f < float(start_age) or age_f > float(edad_final):
+            continue
+        month_idx = int(round((age_f - float(start_age)) * 12)) + 1
+        max_month = int((int(edad_final) - int(start_age)) * 12)
+        if 1 <= month_idx <= max_month:
+            events.append((month_idx, amount_f))
+    return tuple(events)
+
+
+def run_retirement_age_4pct_sensitivity(
+    *,
+    base_result: dict,
+    saving_ranges: tuple | None,
+    recurring_events: tuple,
+    lump_events_monthly: tuple,
+    lump_age_events: tuple,
+    n_paths: int,
+    withdrawal_rate_annual: float = 0.04,
+) -> pd.DataFrame:
+    """Evalúa todas las edades de jubilación con regla 4% sobre patrimonio P50 de esa edad.
+
+    La tabla muestra el retiro nominal de la edad evaluada y su equivalente en pesos de hoy.
+    La supervivencia se estima desde esa edad hasta los 90 usando ese retiro inicial, indexado
+    desde la misma edad si el escenario principal tiene indexación activa.
+    """
+    inputs = base_result["inputs"]
+    edad_inicial = int(inputs.get("edad_inicial"))
+    edad_final = int(inputs.get("edad_final"))
+    planned_age = int(inputs.get("edad_inicio_retiro"))
+    rows = []
+    n_paths = int(max(1000, n_paths))
+
+    for age in range(edad_inicial, edad_final):
+        candidate_savings = adapt_saving_ranges_for_retirement_age(saving_ranges, planned_age, age)
+        # 1) Simula acumulación hasta esa edad sin retiro, para estimar patrimonio disponible.
+        accum = monte_carlo_accumulation_withdrawal_mm(
+            edad_inicial=edad_inicial,
+            edad_final=edad_final,
+            edad_inicio_retiro=age,
+            n_paths=n_paths,
+            initial_capital_mm=float(inputs["initial_capital_mm"]),
+            annual_return_mean=float(inputs["annual_return_mean_requested"]),
+            annual_return_std=float(inputs["annual_return_std"]),
+            annual_return_low=float(inputs["annual_return_low"]),
+            annual_return_high=float(inputs["annual_return_high"]),
+            monthly_saving_min_mm=0.0,
+            monthly_saving_mode_mm=0.0,
+            monthly_saving_max_mm=0.0,
+            withdrawal_monthly_mm=0.0,
+            contribution_timing=str(inputs.get("contribution_timing", "end")),
+            withdrawal_timing=str(inputs.get("withdrawal_timing", "end")),
+            target_mm=None,
+            seed=int(inputs.get("seed", 123)) + 51000 + age * 29,
+            mean_is_effective=bool(inputs.get("mean_is_effective", True)),
+            lump_sum_events=lump_events_monthly,
+            recurring_monthly_events=recurring_events,
+            saving_ranges=candidate_savings,
+            floor_zero=bool(inputs.get("floor_zero", True)),
+            return_model=str(inputs.get("return_model", "monthly_iid")),
+            withdrawal_indexed_to_inflation=False,
+            inflation_annual=float(inputs.get("inflation_annual", 0.0)),
+            withdrawal_index_base_age=float(inputs.get("edad_inicial", edad_inicial)),
+            savings_indexed_to_inflation=bool(inputs.get("savings_indexed_to_inflation", False)),
+        )
+        capital_p50_mm = float(np.percentile(accum["wealth_at_retirement_mm"], 50))
+        capital_p50_clp = capital_p50_mm * 1_000_000
+        retiro_anual_nominal_clp = capital_p50_clp * float(withdrawal_rate_annual)
+        retiro_mensual_nominal_clp = retiro_anual_nominal_clp / 12
+        retiro_anual_hoy_clp = nominal_to_today_clp(retiro_anual_nominal_clp, age, inputs)
+        retiro_mensual_hoy_clp = retiro_anual_hoy_clp / 12
+
+        # 2) Simula desde esa edad hasta 90 con ese retiro inicial.
+        future_lumps = lump_age_events_to_monthly_from_start(lump_age_events, age, edad_final)
+        survival = monte_carlo_accumulation_withdrawal_mm(
+            edad_inicial=age,
+            edad_final=edad_final,
+            edad_inicio_retiro=age,
+            n_paths=n_paths,
+            initial_capital_mm=capital_p50_mm,
+            annual_return_mean=float(inputs["annual_return_mean_requested"]),
+            annual_return_std=float(inputs["annual_return_std"]),
+            annual_return_low=float(inputs["annual_return_low"]),
+            annual_return_high=float(inputs["annual_return_high"]),
+            monthly_saving_min_mm=0.0,
+            monthly_saving_mode_mm=0.0,
+            monthly_saving_max_mm=0.0,
+            withdrawal_monthly_mm=clp_to_mm(retiro_mensual_nominal_clp),
+            contribution_timing=str(inputs.get("contribution_timing", "end")),
+            withdrawal_timing=str(inputs.get("withdrawal_timing", "end")),
+            target_mm=None,
+            seed=int(inputs.get("seed", 123)) + 61000 + age * 31,
+            mean_is_effective=bool(inputs.get("mean_is_effective", True)),
+            lump_sum_events=future_lumps,
+            recurring_monthly_events=recurring_events,
+            saving_ranges=tuple(),
+            floor_zero=bool(inputs.get("floor_zero", True)),
+            return_model=str(inputs.get("return_model", "monthly_iid")),
+            withdrawal_indexed_to_inflation=bool(inputs.get("withdrawal_indexed_to_inflation", True)),
+            inflation_annual=float(inputs.get("inflation_annual", 0.0)),
+            withdrawal_index_base_age=float(age),
+            savings_indexed_to_inflation=False,
+        )
+        success_pct = float(survival.get("prob_no_ruin", np.nan) * 100)
+        if success_pct >= 90:
+            estado = "Aguanta"
+        elif success_pct >= 70:
+            estado = "Frágil"
+        else:
+            estado = "No aguanta"
+        rows.append(
+            {
+                "Edad jubilación": int(age),
+                "Año calendario": datetime.now().year + (int(age) - edad_inicial),
+                "Patrimonio P50 nominal": capital_p50_clp,
+                "Patrimonio P50 pesos de hoy": nominal_to_today_clp(capital_p50_clp, age, inputs),
+                "Retiro anual 4% nominal": retiro_anual_nominal_clp,
+                "Retiro mensual 4% nominal": retiro_mensual_nominal_clp,
+                "Retiro anual 4% pesos de hoy": retiro_anual_hoy_clp,
+                "Retiro mensual 4% pesos de hoy": retiro_mensual_hoy_clp,
+                "Prob. no agotar hasta 90": success_pct,
+                "Edad mediana agotamiento si falla": survival.get("median_ruin_age", np.nan),
+                "Estado": estado,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def format_retirement_4pct_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    display = df.copy()
+    money_cols = [
+        "Patrimonio P50 nominal",
+        "Patrimonio P50 pesos de hoy",
+        "Retiro anual 4% nominal",
+        "Retiro mensual 4% nominal",
+        "Retiro anual 4% pesos de hoy",
+        "Retiro mensual 4% pesos de hoy",
+    ]
+    for col in money_cols:
+        if col in display.columns:
+            display[col] = display[col].apply(fmt_clp)
+    if "Prob. no agotar hasta 90" in display.columns:
+        display["Prob. no agotar hasta 90"] = display["Prob. no agotar hasta 90"].apply(lambda x: fmt_pct(float(x), 1))
+    if "Edad mediana agotamiento si falla" in display.columns:
+        display["Edad mediana agotamiento si falla"] = display["Edad mediana agotamiento si falla"].apply(lambda x: "No se agota" if pd.isna(x) else f"{float(x):,.1f} años".replace(".", ","))
+    return display
+
+
+def style_retirement_4pct_sensitivity(df: pd.DataFrame):
+    display = format_retirement_4pct_sensitivity(df)
+    if df is None or df.empty:
+        return display
+    estados = list(df.get("Estado", pd.Series([""] * len(df))))
+    colors = {
+        "Aguanta": "background-color: rgba(48, 209, 88, 0.22); color: #FFFFFF;",
+        "Frágil": "background-color: rgba(255, 209, 102, 0.24); color: #FFFFFF;",
+        "No aguanta": "background-color: rgba(255, 92, 122, 0.26); color: #FFFFFF;",
+    }
+    def row_style(row):
+        state = estados[row.name] if row.name < len(estados) else ""
+        style = colors.get(state, "")
+        return [style for _ in row]
+    return display.style.apply(row_style, axis=1)
+
+
 def make_display_table(tabla: pd.DataFrame) -> pd.DataFrame:
     display = tabla.copy()
     rename_map = {
@@ -2001,6 +2402,7 @@ def make_executive_excel_report(
         fire_scan = safe_df(fire_analysis.get("fire_scan") if fire_analysis else None)
         coast_scan = safe_df(fire_analysis.get("coast_scan") if fire_analysis else None)
         realistic_matrix = safe_df(fire_analysis.get("realistic_matrix_clp") if fire_analysis else None)
+        retirement_4pct = safe_df(fire_analysis.get("retirement_4pct_sensitivity") if fire_analysis else None)
         target_success_pct = float(fire_analysis.get("target_success_pct", 90.0)) if fire_analysis else 90.0
         fire_row = find_fire_row(fire_scan, target_success_pct) if not fire_scan.empty else None
         coast_row = None
@@ -2237,9 +2639,59 @@ def make_executive_excel_report(
             ws.write(4, 0, "La matriz FIRE no fue calculada todavía en la app.", fmt_note)
 
         # ----------------------------------------------------
-        # 05 Percentiles
+        # 05 Calendario
         # ----------------------------------------------------
-        ws = add_sheet("05 Percentiles")
+        ws = add_sheet("05 Calendario")
+        write_title(ws, "Calendario anual del plan", "Línea de tiempo con hitos del plan: cambios de ahorro, flujos únicos, retiro, arriendos, AFP y edad de agotamiento si falla.")
+        timeline = build_event_timeline_table(result, tabla, saving_ranges_df, recurring_df, lump_df, afp_info)
+        timeline_excel = timeline.drop(columns=["Tipo evento"], errors="ignore")
+        r = write_table(
+            ws,
+            timeline_excel,
+            4,
+            title="Tabla cronológica por edad",
+            money_cols={
+                "Patrimonio P50 inicio", "Patrimonio P50 fin", "Retiro mensual nominal",
+                "Retiro mensual en pesos de hoy", "Ingresos recurrentes mensuales",
+                "Egresos recurrentes mensuales", "Flujo único anual"
+            },
+            int_cols={"Año", "Edad"},
+        )
+        ws.write(r, 0, "Nota", fmt_header)
+        ws.merge_range(r, 1, r + 1, 8, "Los montos nominales corresponden a pesos de cada año/edad. La columna en pesos de hoy deflacta por la inflación anual del escenario para facilitar la comparación temporal.", fmt_note)
+
+        # ----------------------------------------------------
+        # 06 Jubilación 4%
+        # ----------------------------------------------------
+        ws = add_sheet("06 Jubilacion 4pct")
+        write_title(ws, "Sensibilidad por edad de jubilación con regla 4%", "Para cada edad se estima el patrimonio P50 disponible, el retiro inicial equivalente al 4% anual y su monto nominal y en pesos de hoy.")
+        if not retirement_4pct.empty:
+            ret4 = retirement_4pct.copy()
+            if "Prob. no agotar hasta 90" in ret4.columns:
+                ret4["Probabilidad no agotar"] = ret4["Prob. no agotar hasta 90"] / 100
+                ret4 = ret4.drop(columns=["Prob. no agotar hasta 90"])
+            r = write_table(
+                ws,
+                ret4,
+                4,
+                title="Todas las edades evaluadas",
+                money_cols={
+                    "Patrimonio P50 nominal", "Patrimonio P50 pesos de hoy",
+                    "Retiro anual 4% nominal", "Retiro mensual 4% nominal",
+                    "Retiro anual 4% pesos de hoy", "Retiro mensual 4% pesos de hoy"
+                },
+                pct_cols={"Probabilidad no agotar"},
+                int_cols={"Edad jubilación", "Año calendario"},
+            )
+            ws.write(r, 0, "Interpretación", fmt_header)
+            ws.merge_range(r, 1, r + 2, 8, "Esta tabla no reemplaza el escenario principal de retiro fijo. Es una sensibilidad intuitiva: si te jubilaras a cada edad, calcula cuánto sería 4% anual del patrimonio P50 estimado y evalúa si ese retiro inicial, indexado desde esa edad, sobrevive hasta los 90.", fmt_note)
+        else:
+            ws.write(4, 0, "Calcula FIRE / Coast / Matriz en la app para generar esta sensibilidad.", fmt_note)
+
+        # ----------------------------------------------------
+        # 07 Percentiles
+        # ----------------------------------------------------
+        ws = add_sheet("07 Percentiles")
         write_title(ws, "Percentiles de patrimonio por edad", "Evolución anual del patrimonio simulado. P50 es la mediana; P5/P95 muestran escenarios pesimista/optimista.")
         percentiles = make_numeric_csv_table(tabla)
         r = write_table(
@@ -2263,20 +2715,20 @@ def make_executive_excel_report(
             chart = wb.add_chart({"type": "line"})
             chart.add_series({
                 "name": "P5",
-                "categories": ["05 Percentiles", first_row, edad_col, last_row, edad_col],
-                "values": ["05 Percentiles", first_row, p5_col, last_row, p5_col],
+                "categories": ["07 Percentiles", first_row, edad_col, last_row, edad_col],
+                "values": ["07 Percentiles", first_row, p5_col, last_row, p5_col],
                 "line": {"color": "#FF5C7A", "width": 2.0},
             })
             chart.add_series({
                 "name": "P50 mediana",
-                "categories": ["05 Percentiles", first_row, edad_col, last_row, edad_col],
-                "values": ["05 Percentiles", first_row, p50_col, last_row, p50_col],
+                "categories": ["07 Percentiles", first_row, edad_col, last_row, edad_col],
+                "values": ["07 Percentiles", first_row, p50_col, last_row, p50_col],
                 "line": {"color": "#00D1FF", "width": 2.75},
             })
             chart.add_series({
                 "name": "P95",
-                "categories": ["05 Percentiles", first_row, edad_col, last_row, edad_col],
-                "values": ["05 Percentiles", first_row, p95_col, last_row, p95_col],
+                "categories": ["07 Percentiles", first_row, edad_col, last_row, edad_col],
+                "values": ["07 Percentiles", first_row, p95_col, last_row, p95_col],
                 "line": {"color": "#30D158", "width": 2.0},
             })
             chart.set_title({"name": "Evolución del patrimonio por percentiles"})
@@ -3208,6 +3660,20 @@ with tab6:
             "orange",
         )
 
+    st.markdown("#### Calendario del plan por edad")
+    st.caption(
+        "Tabla anual con los hitos principales del escenario. Los colores ayudan a leer eventos de vida/ahorro, flujos únicos, inicio de retiro, arriendos, AFP y eventuales zonas de agotamiento."
+    )
+    timeline_df = build_event_timeline_table(
+        result,
+        tabla,
+        st.session_state.get("mc_saving_ranges_df"),
+        st.session_state.get("mc_recurring_df"),
+        st.session_state.get("mc_lump_df"),
+        st.session_state.get("mc_afp_info"),
+    )
+    st.dataframe(style_event_timeline_table(timeline_df), width="stretch", hide_index=True)
+
     mx1, mx2, mx3, mx4 = st.columns([2.2, 1.4, 1.4, 1.2])
     with mx1:
         default_matrix_ages = [35, 37, 40, 43, 45, 48, 50, 55, 60, 65]
@@ -3316,11 +3782,22 @@ with tab6:
                     lump_events_monthly=lump_events_monthly_for_scan,
                 )
 
+                sensitivity_4pct_df = run_retirement_age_4pct_sensitivity(
+                    base_result=result,
+                    saving_ranges=saving_ranges_for_scan,
+                    recurring_events=recurring_events_for_scan,
+                    lump_events_monthly=lump_events_monthly_for_scan,
+                    lump_age_events=lump_events_age_for_matrix,
+                    n_paths=min(int(matrix_n_paths), 3_000),
+                    withdrawal_rate_annual=0.04,
+                )
+
                 analysis = {
                     "required_matrix": required_matrix,
                     "realistic_matrix_clp": realistic_matrix,
                     "fire_scan": fire_scan_df,
                     "coast_scan": coast_df,
+                    "retirement_4pct_sensitivity": sensitivity_4pct_df,
                     "target_success_pct": float(fire_target_success_pct),
                     "planned_fire_age": planned_fire_age,
                     "planned_fire_success_pct": float(result["prob_no_ruin"] * 100),
@@ -3420,6 +3897,16 @@ with tab6:
         )
         st.plotly_chart(plot_realistic_required_capital_heatmap(realistic_matrix_clp), width="stretch")
         st.dataframe(format_realistic_matrix_clp(realistic_matrix_clp), width="stretch")
+
+        st.markdown("#### Sensibilidad por edad de jubilación con regla 4%")
+        st.caption(
+            "Evalúa todas las edades desde tu edad actual hasta 89. Para cada edad, estima el patrimonio P50 que tendrías al jubilar, calcula un retiro inicial de 4% anual sobre ese patrimonio y muestra tanto el monto nominal de esa época como su equivalente en pesos de hoy. La supervivencia se estima con ese retiro inicial indexado desde la edad evaluada."
+        )
+        sensitivity_4pct_df = analysis.get("retirement_4pct_sensitivity", pd.DataFrame())
+        if sensitivity_4pct_df is None or sensitivity_4pct_df.empty:
+            st.info("La sensibilidad 4% no está disponible todavía. Vuelve a calcular FIRE / Coast / matriz.")
+        else:
+            st.dataframe(style_retirement_4pct_sensitivity(sensitivity_4pct_df), width="stretch", hide_index=True)
 
         excel_fire_report = make_executive_excel_report(
             result,
