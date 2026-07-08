@@ -238,8 +238,8 @@ def simulate_afp_future_balance_distribution_real_clp(
     Simula saldo AFP real en pesos de hoy.
 
     La SP entrega promedio y desviación estándar del retorno real anualizado.
-    Por simplicidad y consistencia con esa tabla, cada path toma un retorno anualizado
-    real de largo plazo y capitaliza saldo + aportes mensuales con ese retorno.
+    En esta versión cada simulación/path recibe retornos reales aleatorios mensuales
+    coherentes con el promedio y la volatilidad anual del fondo seleccionado.
     """
     initial_balance_clp = max(float(initial_balance_clp), 0.0)
     monthly_contribution_clp = max(float(monthly_contribution_clp), 0.0)
@@ -247,23 +247,28 @@ def simulate_afp_future_balance_distribution_real_clp(
     n_paths = max(int(n_paths), 1)
 
     rng = np.random.default_rng(seed)
-    if n_months == 0:
-        balances = np.full(n_paths, initial_balance_clp, dtype=np.float64)
-        returns = np.full(n_paths, annual_real_return_mean, dtype=np.float64)
-    else:
-        # Evitamos retornos imposibles bajo -100% y extremos poco informativos en el gráfico.
-        returns = rng.normal(annual_real_return_mean, annual_real_return_std, size=n_paths)
-        returns = np.clip(returns, -0.95, 0.50)
-        rm = np.power(1 + returns, 1 / 12) - 1
-        balances = initial_balance_clp * np.power(1 + rm, n_months)
+    balances = np.full(n_paths, initial_balance_clp, dtype=np.float64)
 
-        near_zero = np.abs(rm) < 1e-12
-        annuity = np.empty_like(rm, dtype=np.float64)
-        annuity[near_zero] = n_months
-        annuity[~near_zero] = (np.power(1 + rm[~near_zero], n_months) - 1) / rm[~near_zero]
-        if contribution_timing == "begin":
-            annuity = annuity * (1 + rm)
-        balances = balances + monthly_contribution_clp * annuity
+    if n_months == 0:
+        annualized_returns = np.full(n_paths, annual_real_return_mean, dtype=np.float64)
+    else:
+        # Aproximación mensual IID: media real mensual equivalente y volatilidad anual / sqrt(12).
+        # Se trunca para evitar retornos mensuales imposibles o excesivamente extremos.
+        monthly_mean = (1 + float(annual_real_return_mean)) ** (1 / 12) - 1
+        monthly_std = max(float(annual_real_return_std), 1e-12) / np.sqrt(12)
+        monthly_return_history = np.empty((n_paths, n_months), dtype=np.float32)
+
+        for t in range(n_months):
+            r_t = rng.normal(monthly_mean, monthly_std, size=n_paths)
+            r_t = np.clip(r_t, -0.50, 0.50)
+            monthly_return_history[:, t] = r_t.astype(np.float32)
+            if contribution_timing == "begin":
+                balances = (balances + monthly_contribution_clp) * (1 + r_t)
+            else:
+                balances = balances * (1 + r_t) + monthly_contribution_clp
+
+        compounded = np.prod(1 + monthly_return_history.astype(np.float64), axis=1)
+        annualized_returns = np.power(np.maximum(compounded, 1e-12), 12 / n_months) - 1
 
     percentiles = {
         "p5": float(np.percentile(balances, 5)),
@@ -274,7 +279,7 @@ def simulate_afp_future_balance_distribution_real_clp(
     }
     return {
         "balances_real_clp": balances,
-        "annualized_returns_real": returns,
+        "annualized_returns_real": annualized_returns,
         "mean_balance_real_clp": float(np.mean(balances)),
         "std_balance_real_clp": float(np.std(balances, ddof=1)) if len(balances) > 1 else 0.0,
         "percentiles_balance_real_clp": percentiles,
@@ -640,6 +645,38 @@ def inject_css() -> None:
 
         .download-card b {{ color: var(--text); }}
         .download-card span {{ color: var(--muted); font-size: 0.90rem; }}
+
+        .excel-export-hero {{
+            border: 1px solid rgba(48, 209, 88, 0.42);
+            background: linear-gradient(135deg, rgba(48, 209, 88, 0.18), rgba(0, 209, 255, 0.10), rgba(139, 61, 255, 0.16));
+            border-radius: 26px;
+            padding: 20px 22px;
+            margin: 18px 0 10px 0;
+            box-shadow: 0 18px 46px rgba(0, 0, 0, 0.28), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+        }}
+
+        .excel-export-title {{
+            font-size: 1.22rem;
+            font-weight: 800;
+            color: var(--text);
+            margin-bottom: 4px;
+        }}
+
+        .excel-export-subtitle {{
+            font-size: 0.94rem;
+            color: var(--muted);
+            line-height: 1.35;
+        }}
+
+        div[data-testid="stDownloadButton"] > button[kind="secondary"] {{
+            border: 1px solid rgba(48, 209, 88, 0.55) !important;
+            background: linear-gradient(90deg, rgba(48, 209, 88, 0.92), rgba(0, 209, 255, 0.86)) !important;
+            color: #031135 !important;
+            font-weight: 900 !important;
+            border-radius: 18px !important;
+            padding: 0.85rem 1.1rem !important;
+            box-shadow: 0 14px 34px rgba(0, 209, 255, 0.16) !important;
+        }}
 
         @media (max-width: 1100px) {{
             .step-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
@@ -1531,6 +1568,133 @@ def run_coast_scan(
     return pd.DataFrame(rows)
 
 
+def run_minimum_saving_calculator(
+    *,
+    base_result: dict,
+    monthly_saving_low_clp: float,
+    monthly_saving_high_clp: float,
+    target_success_pct: float,
+    n_paths: int,
+    recurring_events: tuple,
+    lump_events_monthly: tuple,
+    max_iter: int = 14,
+) -> dict:
+    """Busca el ahorro mensual central mínimo para cumplir meta y no quebrar.
+
+    El ahorro probado se interpreta como pesos de hoy si el modelo tiene activada
+    la indexación del ahorro. El motor usa una banda triangular automática de
+    ±$500.000 alrededor del monto central, igual que la interfaz principal.
+    
+    Criterio de éxito conjunto:
+      1) patrimonio al inicio del retiro >= meta, y
+      2) el patrimonio nunca se agota antes de los 90.
+    """
+    inputs = base_result["inputs"]
+    edad_inicial = int(inputs["edad_inicial"])
+    edad_retiro = int(inputs["edad_inicio_retiro"])
+    edad_final = int(inputs["edad_final"])
+    target_mm = float(inputs.get("target_mm")) if inputs.get("target_mm") is not None else None
+    band_clp = 500_000.0
+
+    def simulate(center_clp: float, seed_extra: int = 0) -> dict:
+        center_clp = max(float(center_clp), 0.0)
+        min_clp = max(center_clp - band_clp, 0.0)
+        max_clp = center_clp + band_clp if center_clp > 0 else 0.0
+        saving_ranges = ((
+            float(edad_inicial),
+            float(edad_retiro),
+            clp_to_mm(min_clp),
+            clp_to_mm(center_clp),
+            clp_to_mm(max_clp),
+            "Ahorro calculado mínimo",
+        ),)
+        sim = monte_carlo_accumulation_withdrawal_mm(
+            edad_inicial=edad_inicial,
+            edad_final=edad_final,
+            edad_inicio_retiro=edad_retiro,
+            n_paths=int(n_paths),
+            initial_capital_mm=float(inputs["initial_capital_mm"]),
+            annual_return_mean=float(inputs["annual_return_mean_requested"]),
+            annual_return_std=float(inputs["annual_return_std"]),
+            annual_return_low=float(inputs["annual_return_low"]),
+            annual_return_high=float(inputs["annual_return_high"]),
+            monthly_saving_min_mm=0.0,
+            monthly_saving_mode_mm=0.0,
+            monthly_saving_max_mm=0.0,
+            withdrawal_monthly_mm=float(inputs["withdrawal_monthly_mm"]),
+            contribution_timing=str(inputs.get("contribution_timing", "end")),
+            withdrawal_timing=str(inputs.get("withdrawal_timing", "end")),
+            target_mm=target_mm,
+            seed=int(inputs.get("seed", 123)) + 31000 + int(seed_extra),
+            mean_is_effective=bool(inputs.get("mean_is_effective", True)),
+            lump_sum_events=lump_events_monthly,
+            recurring_monthly_events=recurring_events,
+            saving_ranges=saving_ranges,
+            floor_zero=bool(inputs.get("floor_zero", True)),
+            return_model=str(inputs.get("return_model", "monthly_iid")),
+            withdrawal_indexed_to_inflation=bool(inputs.get("withdrawal_indexed_to_inflation", False)),
+            inflation_annual=float(inputs.get("inflation_annual", 0.0)),
+            withdrawal_index_base_age=float(inputs.get("withdrawal_index_base_age", inputs.get("edad_inicial"))),
+            savings_indexed_to_inflation=bool(inputs.get("savings_indexed_to_inflation", False)),
+        )
+        no_ruin_mask = np.isnan(np.asarray(sim["ruin_month"], dtype=float))
+        if target_mm is None:
+            target_mask = np.ones_like(no_ruin_mask, dtype=bool)
+        else:
+            target_mask = np.asarray(sim["wealth_at_retirement_mm"], dtype=float) >= target_mm
+        joint_success = float(np.mean(no_ruin_mask & target_mask))
+        return {
+            "saving_center_clp": center_clp,
+            "saving_min_clp": min_clp,
+            "saving_max_clp": max_clp,
+            "joint_success_pct": joint_success * 100,
+            "prob_no_ruin_pct": float(sim["prob_no_ruin"] * 100),
+            "prob_target_retirement_pct": float(sim.get("prob_reach_target_at_retirement", np.nan) * 100),
+            "capital_p50_retiro_clp": float(np.percentile(sim["wealth_at_retirement_mm"], 50) * 1_000_000),
+            "capital_p5_retiro_clp": float(np.percentile(sim["wealth_at_retirement_mm"], 5) * 1_000_000),
+            "patrimonio_p50_90_clp": float(np.percentile(sim["final_wealth_mm"], 50) * 1_000_000),
+            "median_ruin_age": sim.get("median_ruin_age", np.nan),
+        }
+
+    target_success_pct = float(target_success_pct)
+    low = max(float(monthly_saving_low_clp), 0.0)
+    high = max(float(monthly_saving_high_clp), low)
+
+    low_result = simulate(low, seed_extra=0)
+    high_result = simulate(high, seed_extra=1)
+
+    if high_result["joint_success_pct"] < target_success_pct:
+        return {
+            "status": "no_alcanza",
+            "target_success_pct": target_success_pct,
+            "low_result": low_result,
+            "high_result": high_result,
+            "best_result": high_result,
+            "iterations": [],
+        }
+
+    iterations = []
+    best = high_result
+    for i in range(int(max_iter)):
+        mid = (low + high) / 2
+        mid_result = simulate(mid, seed_extra=100 + i)
+        iterations.append(mid_result)
+        if mid_result["joint_success_pct"] >= target_success_pct:
+            best = mid_result
+            high = mid
+        else:
+            low = mid
+
+    return {
+        "status": "ok",
+        "target_success_pct": target_success_pct,
+        "low_result": low_result,
+        "high_result": high_result,
+        "best_result": best,
+        "iterations": iterations,
+    }
+
+
 
 def make_display_table(tabla: pd.DataFrame) -> pd.DataFrame:
     display = tabla.copy()
@@ -1894,6 +2058,36 @@ def make_executive_excel_report(
         last_row = 6 + len(flows_by_age)
         ws.conditional_format(6, 5, last_row, 5, {"type": "cell", "criteria": ">=", "value": 0, "format": fmt_good})
         ws.conditional_format(6, 5, last_row, 5, {"type": "cell", "criteria": "<", "value": 0, "format": fmt_bad})
+        # Gráfico ejecutivo de flujos anuales.
+        if len(flows_by_age) > 0:
+            chart = wb.add_chart({"type": "line"})
+            data_first = 7
+            data_last = 6 + len(flows_by_age)
+            chart.add_series({
+                "name": "Ahorro anual",
+                "categories": ["02 Flujos", data_first, 0, data_last, 0],
+                "values": ["02 Flujos", data_first, 1, data_last, 1],
+                "line": {"color": "#30D158", "width": 2.25},
+            })
+            chart.add_series({
+                "name": "Retiro anual",
+                "categories": ["02 Flujos", data_first, 0, data_last, 0],
+                "values": ["02 Flujos", data_first, 2, data_last, 2],
+                "line": {"color": "#FF5C7A", "width": 2.25},
+            })
+            chart.add_series({
+                "name": "Flujo neto antes de retorno",
+                "categories": ["02 Flujos", data_first, 0, data_last, 0],
+                "values": ["02 Flujos", data_first, 5, data_last, 5],
+                "line": {"color": "#00D1FF", "width": 2.75},
+            })
+            chart.set_title({"name": "Flujos anuales del escenario"})
+            chart.set_x_axis({"name": "Edad"})
+            chart.set_y_axis({"name": "CLP nominal"})
+            chart.set_legend({"position": "bottom"})
+            chart.set_size({"width": 720, "height": 360})
+            ws.insert_chart("J5", chart)
+
         ws.write(r, 0, "Cómo leer", fmt_header)
         ws.merge_range(r, 1, r + 1, 8, "Si el flujo neto anual es negativo, el patrimonio invertido debe financiar esa diferencia además del efecto de mercado. Si es positivo, entra más plata de la que sale antes de retorno.", fmt_note)
 
@@ -1933,15 +2127,38 @@ def make_executive_excel_report(
         if not fire_scan.empty:
             fire_display = fire_scan.copy()
             fire_display["prob_exito"] = fire_display["prob_exito_pct"] / 100
+            fire_table_start = r
+            fire_table_df = fire_display.drop(columns=[c for c in ["prob_exito_pct"] if c in fire_display.columns])
             r = write_table(
                 ws,
-                fire_display.drop(columns=[c for c in ["prob_exito_pct"] if c in fire_display.columns]),
+                fire_table_df,
                 r,
                 title="Detalle FIRE por edad evaluada",
                 money_cols={"capital_p5_retiro_clp", "capital_p50_retiro_clp", "capital_p95_retiro_clp", "patrimonio_p50_90_clp", "primer_retiro_nominal_clp"},
                 pct_cols={"prob_exito"},
                 int_cols={"edad_retiro"},
             )
+            # Gráfico: probabilidad de éxito por edad evaluada.
+            if len(fire_table_df) > 0 and "edad_retiro" in fire_table_df.columns and "prob_exito" in fire_table_df.columns:
+                header_row = fire_table_start + 2
+                first_row = header_row + 1
+                last_row = header_row + len(fire_table_df)
+                edad_col = list(fire_table_df.columns).index("edad_retiro")
+                prob_col = list(fire_table_df.columns).index("prob_exito")
+                chart = wb.add_chart({"type": "column"})
+                chart.add_series({
+                    "name": "Probabilidad de éxito",
+                    "categories": ["03 FIRE Coast", first_row, edad_col, last_row, edad_col],
+                    "values": ["03 FIRE Coast", first_row, prob_col, last_row, prob_col],
+                    "fill": {"color": "#8B3DFF"},
+                    "border": {"color": "#8B3DFF"},
+                })
+                chart.set_title({"name": "Éxito simulado por edad FIRE"})
+                chart.set_x_axis({"name": "Edad de retiro"})
+                chart.set_y_axis({"name": "Probabilidad", "num_format": "0%", "min": 0, "max": 1})
+                chart.set_legend({"none": True})
+                chart.set_size({"width": 720, "height": 330})
+                ws.insert_chart("J5", chart)
         if not coast_scan.empty:
             coast_display = coast_scan.copy()
             coast_display["prob_exito"] = coast_display["prob_exito_pct"] / 100
@@ -2002,6 +2219,41 @@ def make_executive_excel_report(
             money_cols={c for c in percentiles.columns if c.endswith("_clp")},
             int_cols={"edad", "año_simulación"},
         )
+        # Gráfico de percentiles patrimoniales.
+        needed_cols = ["edad", "p5_clp", "p50_mediana_clp", "p95_clp"]
+        if len(percentiles) > 0 and all(c in percentiles.columns for c in needed_cols):
+            header_row = 6
+            first_row = 7
+            last_row = 6 + len(percentiles)
+            edad_col = list(percentiles.columns).index("edad")
+            p5_col = list(percentiles.columns).index("p5_clp")
+            p50_col = list(percentiles.columns).index("p50_mediana_clp")
+            p95_col = list(percentiles.columns).index("p95_clp")
+            chart = wb.add_chart({"type": "line"})
+            chart.add_series({
+                "name": "P5",
+                "categories": ["05 Percentiles", first_row, edad_col, last_row, edad_col],
+                "values": ["05 Percentiles", first_row, p5_col, last_row, p5_col],
+                "line": {"color": "#FF5C7A", "width": 2.0},
+            })
+            chart.add_series({
+                "name": "P50 mediana",
+                "categories": ["05 Percentiles", first_row, edad_col, last_row, edad_col],
+                "values": ["05 Percentiles", first_row, p50_col, last_row, p50_col],
+                "line": {"color": "#00D1FF", "width": 2.75},
+            })
+            chart.add_series({
+                "name": "P95",
+                "categories": ["05 Percentiles", first_row, edad_col, last_row, edad_col],
+                "values": ["05 Percentiles", first_row, p95_col, last_row, p95_col],
+                "line": {"color": "#30D158", "width": 2.0},
+            })
+            chart.set_title({"name": "Evolución del patrimonio por percentiles"})
+            chart.set_x_axis({"name": "Edad"})
+            chart.set_y_axis({"name": "CLP nominal"})
+            chart.set_legend({"position": "bottom"})
+            chart.set_size({"width": 780, "height": 380})
+            ws.insert_chart("J5", chart)
 
         # Anchos razonables globales.
         for sheet_name, ws in writer.sheets.items():
@@ -2229,7 +2481,11 @@ with st.form("formulario_simulacion"):
         )
         with st.expander("Ver supuestos SP usados para AFP", expanded=False):
             st.dataframe(sp_returns_df, width="stretch", hide_index=True)
-            st.caption("Fuente: Superintendencia de Pensiones. Retornos reales anualizados entregados como promedio y desviación estándar. En la app se usan para simular el saldo AFP al jubilar.")
+            st.caption(
+                "La tabla de la SP entrega retornos reales anualizados como promedio y desviación estándar. "
+                "La app simula retornos aleatorios por path para proyectar el saldo AFP al jubilar. "
+                "El paso de saldo AFP a pensión depende de factores actuariales/CNU/beneficiarios; por eso se usa un factor de conversión anual configurable."
+            )
 
         afp1, afp2, afp3 = st.columns(3)
         with afp1:
@@ -2237,10 +2493,14 @@ with st.form("formulario_simulacion"):
         with afp2:
             afp_monthly_contribution_clp = money_text_input("Ahorro mensual AFP CLP", 600_000, key="afp_monthly_contribution_clp_text")
         with afp3:
-            afp_retirement_age = st.number_input("Edad jubilación AFP", min_value=int(edad_inicial), max_value=EDAD_FINAL_FIJA, value=min(max(60, int(edad_inicial)), EDAD_FINAL_FIJA), step=1)
+            afp_retirement_age = st.number_input(
+                "Edad jubilación AFP",
+                min_value=int(edad_inicial),
+                max_value=EDAD_FINAL_FIJA,
+                value=min(max(65, int(edad_inicial)), EDAD_FINAL_FIJA),
+                step=1,
+            )
 
-        # Evitamos selectbox aquí porque en algunos despliegues de Streamlit, al abrir el dropdown dentro de tabs/form,
-        # el overlay puede desordenar visualmente el resto de menús. Radio horizontal es más estable y más claro.
         afp4, afp5 = st.columns([2.4, 1.0])
         with afp4:
             afp_fund = st.radio(
@@ -2248,18 +2508,37 @@ with st.form("formulario_simulacion"):
                 list(AFP_RETURN_ASSUMPTIONS.keys()),
                 index=2,
                 horizontal=True,
-                help="Cada simulación toma retornos aleatorios usando el promedio y la desviación estándar del fondo elegido.",
+                help="Cada simulación toma retornos reales aleatorios usando el promedio y la desviación estándar del fondo elegido.",
             )
         with afp5:
-            afp_withdrawal_rate_pct = st.number_input("Tasa retiro AFP anual (%)", min_value=0.0, max_value=10.0, value=3.2, step=0.1)
+            afp_conversion_factor_pct_input = st.number_input(
+                "Factor conversión AFP anual (%)",
+                min_value=0.0,
+                max_value=12.0,
+                value=5.0,
+                step=0.1,
+                help="Aproxima la pensión anual como porcentaje del saldo AFP al jubilar. El simulador SP suele incorporar CNU, edad, sexo y beneficiarios; por eso este factor puede ser mayor que 3,2%.",
+            )
 
         afp_pension_percentile_label = st.radio(
-            "Escenario usado como pensión",
+            "Escenario de saldo AFP usado para pensión",
             list(AFP_PERCENTILE_OPTIONS.keys()),
             index=1,
             horizontal=True,
-            help="Define qué percentil del saldo AFP simulado se usa para calcular la pensión mensual que entra al flujo.",
+            help="Define qué percentil del saldo AFP simulado se usa para calcular la pensión mensual que entra al flujo patrimonial.",
         )
+
+        with st.expander("Calibrar contra el simulador de la SP", expanded=False):
+            sp_reference_pension_clp = money_text_input(
+                "Pensión esperada SP mensual CLP opcional",
+                0,
+                key="afp_sp_reference_pension_clp_text",
+                help="Si ingresas la pensión esperada que muestra el simulador de la SP, la app recalcula automáticamente el factor de conversión anual para empatar ese monto.",
+            )
+            st.caption(
+                "Úsalo si quieres que esta app parta desde el mismo número AFP que te entrega el simulador oficial. "
+                "Ejemplo: si la SP muestra $2.701.927, escríbelo acá."
+            )
 
         afp_return_mean = float(AFP_RETURN_ASSUMPTIONS[afp_fund]["mean"])
         afp_return_std = float(AFP_RETURN_ASSUMPTIONS[afp_fund]["std"])
@@ -2280,7 +2559,15 @@ with st.form("formulario_simulacion"):
         afp_selected_key = f"p{afp_selected_percentile}"
         afp_fv_real_clp = float(afp_balance_percentiles.get(afp_selected_key, afp_balance_percentiles["p50"]))
         afp_fv_real_mean_clp = float(afp_sim["mean_balance_real_clp"])
-        afp_monthly_pension_real_clp = afp_fv_real_clp * (float(afp_withdrawal_rate_pct) / 100) / 12
+
+        if float(sp_reference_pension_clp) > 0 and afp_fv_real_clp > 0:
+            afp_conversion_factor_pct = float(sp_reference_pension_clp) * 12 / afp_fv_real_clp * 100
+            afp_conversion_source = "Calibrado contra simulador SP"
+        else:
+            afp_conversion_factor_pct = float(afp_conversion_factor_pct_input)
+            afp_conversion_source = "Manual / aproximado"
+
+        afp_monthly_pension_real_clp = afp_fv_real_clp * (float(afp_conversion_factor_pct) / 100) / 12
         afp_monthly_inflation = (1 + float(inflation_annual_pct) / 100) ** (1 / 12) - 1 if float(inflation_annual_pct) > -100 else 0.0
         afp_monthly_pension_nominal_start_clp = afp_monthly_pension_real_clp * (1 + afp_monthly_inflation) ** months_to_afp
 
@@ -2290,9 +2577,9 @@ with st.form("formulario_simulacion"):
         with afp_summary[1]:
             st.markdown(f"""<div class="mini-card"><b>Saldo AFP al jubilar</b><span>{fmt_clp(afp_fv_real_clp)} de hoy<br>{afp_pension_percentile_label}</span></div>""", unsafe_allow_html=True)
         with afp_summary[2]:
-            st.markdown(f"""<div class="mini-card"><b>Pensión real mensual</b><span>{fmt_clp(afp_monthly_pension_real_clp)} de hoy</span></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="mini-card"><b>Pensión real mensual</b><span>{fmt_clp(afp_monthly_pension_real_clp)} de hoy<br>Factor {fmt_pct(afp_conversion_factor_pct, 2)}</span></div>""", unsafe_allow_html=True)
         with afp_summary[3]:
-            st.markdown(f"""<div class="mini-card"><b>Pensión nominal inicial</b><span>{fmt_clp(afp_monthly_pension_nominal_start_clp)} a los {int(afp_retirement_age)}</span></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="mini-card"><b>Pensión nominal inicial</b><span>{fmt_clp(afp_monthly_pension_nominal_start_clp)} a los {int(afp_retirement_age)}<br>{afp_conversion_source}</span></div>""", unsafe_allow_html=True)
 
         afp_dist_df = pd.DataFrame(
             {
@@ -2306,19 +2593,20 @@ with st.form("formulario_simulacion"):
                     fmt_clp(afp_fv_real_mean_clp),
                 ],
                 "Pensión mensual real aprox.": [
-                    fmt_clp(afp_balance_percentiles["p5"] * (float(afp_withdrawal_rate_pct) / 100) / 12),
-                    fmt_clp(afp_balance_percentiles["p25"] * (float(afp_withdrawal_rate_pct) / 100) / 12),
-                    fmt_clp(afp_balance_percentiles["p50"] * (float(afp_withdrawal_rate_pct) / 100) / 12),
-                    fmt_clp(afp_balance_percentiles["p75"] * (float(afp_withdrawal_rate_pct) / 100) / 12),
-                    fmt_clp(afp_balance_percentiles["p95"] * (float(afp_withdrawal_rate_pct) / 100) / 12),
-                    fmt_clp(afp_fv_real_mean_clp * (float(afp_withdrawal_rate_pct) / 100) / 12),
+                    fmt_clp(afp_balance_percentiles["p5"] * (float(afp_conversion_factor_pct) / 100) / 12),
+                    fmt_clp(afp_balance_percentiles["p25"] * (float(afp_conversion_factor_pct) / 100) / 12),
+                    fmt_clp(afp_balance_percentiles["p50"] * (float(afp_conversion_factor_pct) / 100) / 12),
+                    fmt_clp(afp_balance_percentiles["p75"] * (float(afp_conversion_factor_pct) / 100) / 12),
+                    fmt_clp(afp_balance_percentiles["p95"] * (float(afp_conversion_factor_pct) / 100) / 12),
+                    fmt_clp(afp_fv_real_mean_clp * (float(afp_conversion_factor_pct) / 100) / 12),
                 ],
             }
         )
         with st.expander("Ver distribución AFP simulada", expanded=False):
             st.dataframe(afp_dist_df, width="stretch", hide_index=True)
-        st.caption("Si el ahorro AFP ya está dentro de tus tramos de ahorro patrimonial, evita duplicarlo. La pensión AFP que entra al flujo patrimonial es el escenario seleccionado arriba.")
+        st.caption("Si el ahorro AFP ya está dentro de tus tramos de ahorro patrimonial, evita duplicarlo. La pensión AFP que entra al flujo patrimonial es el escenario seleccionado arriba y se indexa por inflación.")
         panel_end()
+
 
     with input_tabs[3]:
         panel_start(
@@ -2552,7 +2840,10 @@ if submitted:
         "desv_est_real_anual": float(afp_return_std),
         "escenario_pension": str(afp_pension_percentile_label),
         "percentil_pension": int(afp_selected_percentile),
-        "tasa_retiro_anual": float(afp_withdrawal_rate_pct) / 100,
+        "factor_conversion_anual": float(afp_conversion_factor_pct) / 100,
+        "factor_conversion_fuente": str(afp_conversion_source),
+        "pension_sp_referencia_clp": float(sp_reference_pension_clp),
+        "tasa_retiro_anual": float(afp_conversion_factor_pct) / 100,  # alias compatible
         "saldo_estimado_real_clp": float(afp_fv_real_clp),
         "saldo_promedio_real_clp": float(afp_fv_real_mean_clp),
         "saldo_p5_real_clp": float(afp_balance_percentiles["p5"]),
@@ -2750,7 +3041,7 @@ with st.expander("Qué significa cada métrica", expanded=False):
 # ============================================================
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-    ["Percentiles", "Flujos", "Paths", "Distribución final", "Agotamiento", "FIRE / Coast / Matriz", "Tablas"]
+    ["Percentiles", "Flujos", "Paths", "Distribución final", "Agotamiento", "FIRE / Coast / Matriz", "Calculadora ahorro"]
 )
 
 with tab1:
@@ -2775,7 +3066,7 @@ with tab2:
         with afp_cols[3]:
             st.markdown(f"""<div class="definition-card"><b>Supuestos</b><br><span>{afp.get('fondo', 'AFP')} · μ {fmt_pct(afp['retorno_real_anual']*100, 2)} · σ {fmt_pct(afp.get('desv_est_real_anual', 0)*100, 2)} · retiro {fmt_pct(afp['tasa_retiro_anual']*100)}</span></div>""", unsafe_allow_html=True)
     # Se eliminaron las tablas/vistas auxiliares con montos formateados bajo el gráfico de flujos.
-    # El detalle numérico queda disponible en el tab "Tablas" y en los CSV descargables.
+    # El detalle numérico queda disponible dentro del reporte ejecutivo Excel.
 
 with tab3:
     n_sample = st.slider("Paths a mostrar", min_value=50, max_value=1_000, value=300, step=50)
@@ -2995,6 +3286,37 @@ with tab6:
     if analysis is None:
         st.warning("Presiona **Calcular FIRE / Coast / matriz realista** para generar el análisis.")
     else:
+        excel_fire_report = make_executive_excel_report(
+            result,
+            tabla,
+            st.session_state.get("mc_saving_ranges_df"),
+            st.session_state.get("mc_recurring_df"),
+            st.session_state.get("mc_lump_df"),
+            st.session_state.get("mc_afp_info"),
+            analysis,
+        )
+        st.markdown(
+            """
+            <div class="excel-export-hero">
+                <div>
+                    <div class="excel-export-title">Reporte ejecutivo del escenario</div>
+                    <div class="excel-export-subtitle">Un solo archivo Excel con inputs, flujos, FIRE, Coast FIRE, matriz realista, percentiles y gráficos para explicar la simulación.</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.download_button(
+            "⬇️ Descargar reporte ejecutivo Excel completo",
+            data=excel_fire_report,
+            file_name="reporte_fire_cliente.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Archivo único con colores, tablas explicativas, matriz FIRE y gráficos.",
+            key="download_excel_fire_unico",
+            width="stretch",
+        )
+        st.divider()
+
         fire_scan_df = analysis.get("fire_scan", pd.DataFrame())
         realistic_matrix_clp = analysis.get("realistic_matrix_clp", pd.DataFrame())
         required_matrix = analysis.get("required_matrix")
@@ -3098,34 +3420,6 @@ with tab6:
                 coast_display["prob_exito_pct"] = coast_display["prob_exito_pct"].apply(lambda x: fmt_pct(x, 2))
                 st.dataframe(coast_display, width="stretch", hide_index=True)
 
-        csv1 = fire_scan_df.to_csv(index=False).encode("utf-8-sig")
-        csv2 = realistic_matrix_clp.reset_index().to_csv(index=False).encode("utf-8-sig")
-        csv3 = coast_scan_df.to_csv(index=False).encode("utf-8-sig") if coast_scan_df is not None else b""
-        d1, d2, d3 = st.columns(3)
-        with d1:
-            st.download_button("Descargar FIRE por edad", data=csv1, file_name="fire_realista_por_edad.csv", mime="text/csv")
-        with d2:
-            st.download_button("Descargar matriz realista", data=csv2, file_name="matriz_fire_realista.csv", mime="text/csv")
-        with d3:
-            st.download_button("Descargar Coast FIRE", data=csv3, file_name="coast_fire.csv", mime="text/csv")
-
-        excel_fire_report = make_executive_excel_report(
-            result,
-            tabla,
-            st.session_state.get("mc_saving_ranges_df"),
-            st.session_state.get("mc_recurring_df"),
-            st.session_state.get("mc_lump_df"),
-            st.session_state.get("mc_afp_info"),
-            analysis,
-        )
-        st.download_button(
-            "Descargar reporte ejecutivo Excel",
-            data=excel_fire_report,
-            file_name="reporte_fire_cliente.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="Excel con inputs, flujos, FIRE, Coast FIRE y matriz realista explicado para cliente.",
-        )
-
         with st.expander("Cómo leer esta sección", expanded=False):
             st.markdown(
                 """
@@ -3136,113 +3430,157 @@ with tab6:
                 """
             )
 
+
 with tab7:
-    st.write("Tabla por edad con montos en CLP")
-    display_table = make_display_table(tabla)
-    st.dataframe(display_table, width="stretch")
-
-    st.write("Resumen final con montos en CLP")
-    summary_display = result["summary"].copy()
-    for col in ["final_wealth_mm", "wealth_at_retirement_mm", "total_savings_mm"]:
-        summary_display[col.replace("_mm", "_clp")] = summary_display[col].apply(fmt_clp_from_mm)
-    st.dataframe(summary_display[["metric", "final_wealth_clp", "wealth_at_retirement_clp", "total_savings_clp"]], width="stretch")
-
     st.markdown(
         """
         <div class="download-card">
-            <b>Exportar escenario</b><br>
-            <span>Descarga un paquete ZIP con CSVs: inputs, resumen, tabla por edad, flujos mensuales, distribución final y tablas editadas. Puedes incluir paths completos si quieres auditar todo, aunque el archivo será más pesado.</span>
+            <b>Calculadora de ahorro mínimo mensual</b><br>
+            <span>Busca cuánto deberías ahorrar cada mes, en pesos de hoy, para llegar a tu meta de patrimonio al iniciar retiro y además no agotar el patrimonio hasta los 90 con el nivel de confianza elegido.</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.info(
+        "Esta calculadora usa los mismos supuestos del escenario principal: capital inicial, edad de retiro, retiro mensual deseado, inflación, AFP, arriendos, eventos únicos y retornos. "
+        "Solo reemplaza los tramos de ahorro por un ahorro mensual único calculado automáticamente con banda triangular de ±$500.000."
+    )
+
+    calc_cols = st.columns([1.1, 1.1, 1.1, 1.1])
+    with calc_cols[0]:
+        calc_target_success_pct = st.selectbox(
+            "Confianza objetivo",
+            options=[80, 85, 90, 95],
+            index=2,
+            help="Se exige cumplir simultáneamente la meta de patrimonio al retiro y no agotar el patrimonio hasta los 90.",
+        )
+    with calc_cols[1]:
+        calc_max_saving_clp = money_input(
+            "Ahorro máximo a probar",
+            8_000_000,
+            help="Si ni este ahorro alcanza, la calculadora marcará que no alcanza con los supuestos actuales.",
+        )
+    with calc_cols[2]:
+        calc_n_paths = st.number_input(
+            "Simulaciones calculadora",
+            min_value=2_000,
+            max_value=50_000,
+            value=10_000,
+            step=2_000,
+            format="%d",
+        )
+    with calc_cols[3]:
+        calc_precision_clp = money_input(
+            "Precisión aproximada",
+            50_000,
+            help="La búsqueda binaria se detiene cerca de este orden de magnitud. Montos más finos tardan más.",
+        )
+
+    st.markdown(
+        f"""
+        <div class="workflow-note">
+            <b>Lectura:</b> si el resultado dice {fmt_clp(3_200_000)}, significa que el modelo estima que deberías ahorrar cerca de ese monto mensual, en pesos de hoy, hasta los {int(result['inputs']['edad_inicio_retiro'])} años. Si tienes activada la indexación del ahorro, ese monto sube con inflación en la simulación.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    csv_tabla = make_numeric_csv_table(tabla).to_csv(index=False).encode("utf-8-sig")
-    csv_summary = summary_display.to_csv(index=False).encode("utf-8-sig")
-    csv_flujos = make_monthly_cashflow_table(result).to_csv(index=False).encode("utf-8-sig")
-    csv_dist = make_final_distribution_table(result).to_csv(index=False).encode("utf-8-sig")
+    if st.button("Calcular ahorro mínimo", type="primary"):
+        if calc_max_saving_clp <= 0:
+            st.error("El ahorro máximo a probar debe ser mayor que cero.")
+        else:
+            with st.spinner("Buscando ahorro mensual mínimo con simulaciones..."):
+                # Iteraciones suficientes para llegar a una precisión práctica sin sobrecargar Streamlit Cloud.
+                span = max(float(calc_max_saving_clp), 1.0)
+                max_iter_calc = int(np.ceil(np.log2(span / max(float(calc_precision_clp), 1.0)))) + 2
+                max_iter_calc = min(max(max_iter_calc, 8), 16)
+                calc_result = run_minimum_saving_calculator(
+                    base_result=result,
+                    monthly_saving_low_clp=0.0,
+                    monthly_saving_high_clp=float(calc_max_saving_clp),
+                    target_success_pct=float(calc_target_success_pct),
+                    n_paths=int(calc_n_paths),
+                    recurring_events=st.session_state.get("mc_recurring_events", tuple()),
+                    lump_events_monthly=tuple(st.session_state.get("mc_lump_age_events", tuple())),
+                    max_iter=max_iter_calc,
+                )
+                st.session_state["mc_min_saving_calc"] = calc_result
 
-    include_paths_export = st.checkbox(
-        "Incluir paths completos en el ZIP",
-        value=False,
-        help="Puede quedar pesado si usas muchas simulaciones. Déjalo apagado para un paquete liviano.",
-    )
-    export_zip = make_export_zip(
-        result,
-        tabla,
-        st.session_state.get("mc_saving_ranges_df"),
-        st.session_state.get("mc_recurring_df"),
-        st.session_state.get("mc_lump_df"),
-        st.session_state.get("mc_afp_info"),
-        st.session_state.get("mc_retirement_matrix"),
-        st.session_state.get("mc_fire_analysis"),
-        include_paths=bool(include_paths_export),
-    )
+    calc_result = st.session_state.get("mc_min_saving_calc")
+    if calc_result:
+        best = calc_result.get("best_result", {})
+        if calc_result.get("status") == "ok":
+            st.success("Se encontró un ahorro mensual que cumple la condición de confianza.")
+            rcols = st.columns(4)
+            with rcols[0]:
+                metric_card(
+                    "Ahorro mensual mínimo",
+                    fmt_clp(best.get("saving_center_clp", np.nan)),
+                    "Monto central en pesos de hoy. El motor usa ±$500.000 alrededor.",
+                    "good",
+                )
+            with rcols[1]:
+                metric_card(
+                    "Éxito conjunto",
+                    fmt_pct(best.get("joint_success_pct", np.nan), 2),
+                    "Meta al retiro + no agotar patrimonio hasta los 90.",
+                    survival_tone(best.get("joint_success_pct", np.nan)),
+                )
+            with rcols[2]:
+                metric_card(
+                    "Capital P50 al retiro",
+                    fmt_clp(best.get("capital_p50_retiro_clp", np.nan)),
+                    "Patrimonio mediano estimado al iniciar el retiro.",
+                    "cyan",
+                )
+            with rcols[3]:
+                metric_card(
+                    "Patrimonio P50 a los 90",
+                    fmt_clp(best.get("patrimonio_p50_90_clp", np.nan)),
+                    "Patrimonio mediano final después de retiros e ingresos.",
+                    "primary",
+                )
 
-    excel_report = make_executive_excel_report(
-        result,
-        tabla,
-        st.session_state.get("mc_saving_ranges_df"),
-        st.session_state.get("mc_recurring_df"),
-        st.session_state.get("mc_lump_df"),
-        st.session_state.get("mc_afp_info"),
-        st.session_state.get("mc_fire_analysis"),
-    )
+            band_cols = st.columns(3)
+            with band_cols[0]:
+                st.markdown(f"""<div class="definition-card"><b>Banda usada por el motor</b><br><span>Mínimo: {fmt_clp(best.get('saving_min_clp', np.nan))}<br>Esperado: {fmt_clp(best.get('saving_center_clp', np.nan))}<br>Máximo: {fmt_clp(best.get('saving_max_clp', np.nan))}</span></div>""", unsafe_allow_html=True)
+            with band_cols[1]:
+                st.markdown(f"""<div class="definition-card"><b>Validación separada</b><br><span>Meta al retiro: {fmt_pct(best.get('prob_target_retirement_pct', np.nan), 2)}<br>No agotar: {fmt_pct(best.get('prob_no_ruin_pct', np.nan), 2)}</span></div>""", unsafe_allow_html=True)
+            with band_cols[2]:
+                st.markdown(f"""<div class="definition-card"><b>Meta del escenario</b><br><span>Capital objetivo: {fmt_clp_from_mm(float(result['inputs'].get('target_mm', np.nan)))}<br>Retiro desde: {int(result['inputs']['edad_inicio_retiro'])} años<br>Confianza exigida: {fmt_pct(calc_result.get('target_success_pct', np.nan), 2)}</span></div>""", unsafe_allow_html=True)
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.download_button(
-            "Reporte ejecutivo Excel",
-            data=excel_report,
-            file_name="reporte_fire_cliente.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="Excel coloreado y explicativo con inputs, flujos, FIRE, Coast FIRE y matriz realista.",
+            history = pd.DataFrame(calc_result.get("iterations", []))
+            if not history.empty:
+                history_display = history[["saving_center_clp", "joint_success_pct", "prob_no_ruin_pct", "prob_target_retirement_pct", "capital_p50_retiro_clp"]].copy()
+                history_display["ahorro_mensual"] = history_display["saving_center_clp"].apply(fmt_clp)
+                history_display["exito_conjunto"] = history_display["joint_success_pct"].apply(lambda x: fmt_pct(x, 2))
+                history_display["no_agotar"] = history_display["prob_no_ruin_pct"].apply(lambda x: fmt_pct(x, 2))
+                history_display["meta_retiro"] = history_display["prob_target_retirement_pct"].apply(lambda x: fmt_pct(x, 2))
+                history_display["capital_p50_retiro"] = history_display["capital_p50_retiro_clp"].apply(fmt_clp)
+                st.dataframe(
+                    history_display[["ahorro_mensual", "exito_conjunto", "no_agotar", "meta_retiro", "capital_p50_retiro"]],
+                    width="stretch",
+                    hide_index=True,
+                )
+        else:
+            st.error("No alcanza con el ahorro máximo probado.")
+            high = calc_result.get("high_result", {})
+            hcols = st.columns(3)
+            with hcols[0]:
+                metric_card("Ahorro máximo probado", fmt_clp(high.get("saving_center_clp", np.nan)), "Sube el máximo o revisa retiro/meta/edad.", "bad")
+            with hcols[1]:
+                metric_card("Éxito conjunto máximo", fmt_pct(high.get("joint_success_pct", np.nan), 2), "Meta al retiro + no agotar hasta 90.", "bad")
+            with hcols[2]:
+                metric_card("Capital P50 al retiro", fmt_clp(high.get("capital_p50_retiro_clp", np.nan)), "Resultado con el ahorro máximo probado.", "orange")
+
+    else:
+        st.markdown(
+            """
+            <div class="definition-card"><b>Qué calcula</b><br>
+            <span>Busca el menor ahorro mensual que cumple simultáneamente: llegar a la meta de patrimonio al comenzar el retiro y no quedarse sin patrimonio antes de los 90 con la confianza objetivo.</span></div>
+            """,
+            unsafe_allow_html=True,
         )
-    with c2:
-        st.download_button(
-            "Descargar ZIP completo",
-            data=export_zip,
-            file_name="escenario_montecarlo_completo.zip",
-            mime="application/zip",
-        )
-    with c3:
-        st.download_button(
-            "Flujos mensuales CSV",
-            data=csv_flujos,
-            file_name="flujos_mensuales_clp.csv",
-            mime="text/csv",
-        )
-    with c4:
-        st.download_button(
-            "Distribución final CSV",
-            data=csv_dist,
-            file_name="distribucion_final_paths_clp.csv",
-            mime="text/csv",
-        )
-
-    st.download_button(
-        "Tabla por edad CSV",
-        data=csv_tabla,
-        file_name="tabla_montecarlo_por_edad_clp.csv",
-        mime="text/csv",
-    )
-
-    with st.expander("Descargas individuales adicionales", expanded=False):
-        c5, c6 = st.columns(2)
-        with c5:
-            st.download_button(
-                "Resumen CSV",
-                data=csv_summary,
-                file_name="resumen_montecarlo_clp.csv",
-                mime="text/csv",
-            )
-        with c6:
-            st.download_button(
-                "Inputs del modelo CSV",
-                data=make_inputs_table(result).to_csv(index=False).encode("utf-8-sig"),
-                file_name="inputs_modelo.csv",
-                mime="text/csv",
-            )
 
 st.divider()
 st.caption(

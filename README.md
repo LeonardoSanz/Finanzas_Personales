@@ -351,3 +351,26 @@ También se eliminó de la interfaz la vista/caption auxiliar de banda triangula
 ## Ajuste AFP UI
 
 La selección de fondo AFP se dejó como botones horizontales en vez de dropdown/selectbox para evitar que el menú desplegable desordene visualmente la sección dentro de tabs/form en Streamlit Cloud. La lógica de cálculo no cambia: cada escenario AFP se simula con el promedio y desviación estándar real anual del fondo elegido.
+
+## Ajuste AFP frente a simulador SP
+
+La sección AFP usa la tabla de retornos reales anualizados de la Superintendencia de Pensiones: promedio y desviación estándar por Fondo A/B/C/D/E y Renta Vitalicia. Cada path de la simulación AFP recibe retornos reales mensuales aleatorios consistentes con esos parámetros.
+
+El saldo AFP proyectado se convierte a pensión mediante un **factor de conversión AFP anual** configurable. Esto reemplaza la antigua tasa fija de 3,2%, porque el simulador oficial de la SP incorpora elementos actuariales como edad, beneficiarios, modalidad de pensión y factores CNU. Si se quiere empatar el resultado oficial, se puede ingresar la **pensión esperada SP mensual** y la app recalibra automáticamente ese factor.
+
+## Última actualización
+
+- Se eliminó la pestaña **Tablas** de la interfaz principal.
+- Se agregó la pestaña **Calculadora ahorro**, que busca por simulación el ahorro mensual mínimo necesario para cumplir simultáneamente:
+  1. llegar a la meta de patrimonio al iniciar retiro, y
+  2. no agotar patrimonio hasta los 90 años,
+  con el nivel de confianza elegido, por defecto 90%.
+- La calculadora usa los mismos supuestos del escenario principal: edad, retiro mensual, inflación, AFP, arriendos, eventos únicos y retornos.
+- El ahorro calculado se interpreta como monto mensual central; el motor usa una banda triangular automática de ±$500.000.
+
+## Último ajuste de exportación
+
+- Se dejó un único botón grande de descarga dentro de la pestaña **FIRE / Coast / Matriz**.
+- Ese botón genera el **reporte ejecutivo Excel completo** en un solo archivo.
+- Se eliminaron los botones separados de CSV para no sobrecargar la interfaz.
+- El Excel ahora incluye tablas explicativas, colores y gráficos de flujos, éxito FIRE por edad y percentiles patrimoniales.
