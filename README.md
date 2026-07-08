@@ -10,13 +10,13 @@ La simulación tiene dos fases:
 1. **Acumulación:** capital inicial + ahorro mensual hasta la edad de inicio de retiro.
 2. **Retiro:** desde la edad elegida el ahorro se vuelve cero y se descuenta un retiro fijo mensual.
 
-El ahorro patrimonial se ingresa por **tramos de edad**. En cada tramo escribes el ahorro mensual esperado en pesos de hoy; la app aplica una banda fija de **±$500.000** alrededor de ese monto usando distribución triangular:
+El ahorro patrimonial se ingresa por **tramos de edad**. En cada tramo escribes el **ahorro objetivo mensual** en pesos de hoy. La simulación usa una mezcla más realista y asimétrica:
 
-| Input | Mínimo simulado | Más probable | Máximo simulado |
+| Input objetivo | Mes normal típico | Mes malo | Mes muy bueno |
 |---|---:|---:|---:|
-| $3.000.000 | $2.500.000 | $3.000.000 | $3.500.000 |
+| $3.000.000 | $2.500.000 a $3.000.000 | $0 a $2.500.000 | $3.000.000 a $3.500.000 |
 
-Desde la edad de inicio de retiro, el ahorro se corta automáticamente. Si activas indexación, cada tramo de ahorro se interpreta como pesos de hoy y sube con inflación hasta el retiro.
+Por defecto, el motor usa 80% de meses normales, 15% de meses malos y 5% de meses muy buenos. Desde la edad de inicio de retiro, el ahorro se corta automáticamente. Si activas indexación, cada tramo de ahorro se interpreta como pesos de hoy y sube con inflación hasta el retiro.
 
 La edad final está fija en **90 años**.
 
@@ -26,7 +26,7 @@ La edad final está fija en **90 años**.
 - Montos ingresados y mostrados en CLP, no como `MM`, con separadores de miles visibles: `1.000.000.000`.
 - Edad final fija en 90 años.
 - Inputs monetarios como texto para poder escribir `50.000.000`, `$50.000.000` o `50 MM`.
-- Tabla de **ahorro mensual por edad**, con un monto esperado por tramo, banda automática fija de ±$500.000 e indexación opcional por inflación.
+- Tabla de **ahorro mensual por edad**, con un ahorro objetivo por tramo, mezcla asimétrica conservadora e indexación opcional por inflación.
 - Bloque para calcular **jubilación AFP estimada** usando saldo actual, ahorro mensual AFP, fondo AFP, retorno real promedio y desviación estándar según supuestos de la Superintendencia de Pensiones.
 - Tabla para flujos mensuales recurrentes indexables:
   - arriendos,
@@ -134,7 +134,7 @@ streamlit run app_montecarlo_retiro.py
 ## Archivos
 
 - `app_montecarlo_retiro.py`: interfaz Streamlit, inputs, KPIs y gráficos.
-- `montecarlo_engine.py`: motor Monte Carlo, incluyendo ahorro triangular por tramos de edad.
+- `montecarlo_engine.py`: motor Monte Carlo, incluyendo ahorro por tramos de edad con mezcla asimétrica conservadora.
 - `requirements.txt`: dependencias.
 - `.streamlit/config.toml`: tema visual oscuro.
 
@@ -332,8 +332,8 @@ Se mantienen solo cuatro cards principales del escenario:
 ## Último ajuste: ahorro por edad simplificado
 
 - Se recuperó la tabla de ahorro por edad.
-- Cada fila permite definir edad inicio, edad fin y ahorro mensual esperado.
-- El mínimo y máximo ya no se ingresan manualmente: se calculan como ahorro esperado ±$500.000.
+- Cada fila permite definir edad inicio, edad fin y ahorro mensual objetivo.
+- El mínimo y máximo ya no se ingresan manualmente: el modelo usa meses normales entre objetivo-$500.000 y objetivo, meses malos bajo ese rango y pocos meses buenos hasta objetivo+$500.000.
 - Si la indexación está activa, los montos de ahorro de cada tramo se interpretan como pesos de hoy y crecen con inflación hasta el retiro.
 
 ## Reporte ejecutivo Excel para cliente
@@ -346,7 +346,7 @@ Se agregó un exportador **Excel ejecutivo** pensado para explicar la simulació
 4. **Matriz FIRE**: matriz realista de capital nominal requerido, con colores y celdas “No alcanza”.
 5. **Percentiles**: evolución anual del patrimonio simulado.
 
-También se eliminó de la interfaz la vista/caption auxiliar de banda triangular para no ensuciar la pantalla. La lógica se mantiene: cada tramo usa ahorro esperado ±$500.000 por detrás.
+También se eliminó de la interfaz la vista auxiliar de la distribución de ahorro para no ensuciar la pantalla. La lógica queda por detrás como mezcla asimétrica conservadora.
 
 ## Ajuste AFP UI
 
@@ -366,7 +366,7 @@ El saldo AFP proyectado se convierte a pensión mediante un **factor de conversi
   2. no agotar patrimonio hasta los 90 años,
   con el nivel de confianza elegido, por defecto 90%.
 - La calculadora usa los mismos supuestos del escenario principal: edad, retiro mensual, inflación, AFP, arriendos, eventos únicos y retornos.
-- El ahorro calculado se interpreta como monto mensual central; el motor usa una banda triangular automática de ±$500.000.
+- El ahorro calculado se interpreta como ahorro objetivo mensual; el motor aplica la misma mezcla asimétrica conservadora.
 
 ## Último ajuste de exportación
 
@@ -374,3 +374,13 @@ El saldo AFP proyectado se convierte a pensión mediante un **factor de conversi
 - Ese botón genera el **reporte ejecutivo Excel completo** en un solo archivo.
 - Se eliminaron los botones separados de CSV para no sobrecargar la interfaz.
 - El Excel ahora incluye tablas explicativas, colores y gráficos de flujos, éxito FIRE por edad y percentiles patrimoniales.
+
+
+## Últimos ajustes
+
+- El botón del Excel ejecutivo queda como descarga única, grande y ubicada bajo la matriz FIRE realista.
+- El gráfico de flujos ahora destaca la línea “Monto que debe salir del fondo”, es decir, la diferencia que el patrimonio invertido debe financiar cuando ingresos/ahorros no cubren retiros y egresos antes del retorno.
+
+## Ajuste de ahorro realista
+
+Se reemplazó la distribución triangular por una mezcla asimétrica conservadora. Si el usuario ingresa un ahorro objetivo de $3.000.000, la mayoría de los meses se simula entre $2.500.000 y $3.000.000; algunos meses malos caen bajo $2.500.000 y solo pocos meses muy buenos superan el objetivo hasta $3.500.000. Esto evita sobreestimar meses buenos imposibles y refleja que en la práctica es más probable ahorrar menos que superar el objetivo.

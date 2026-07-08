@@ -669,13 +669,21 @@ def inject_css() -> None:
         }}
 
         div[data-testid="stDownloadButton"] > button[kind="secondary"] {{
-            border: 1px solid rgba(48, 209, 88, 0.55) !important;
-            background: linear-gradient(90deg, rgba(48, 209, 88, 0.92), rgba(0, 209, 255, 0.86)) !important;
+            border: 1px solid rgba(48, 209, 88, 0.78) !important;
+            background: linear-gradient(90deg, rgba(48, 209, 88, 0.98), rgba(0, 209, 255, 0.94), rgba(139, 61, 255, 0.90)) !important;
             color: #031135 !important;
-            font-weight: 900 !important;
-            border-radius: 18px !important;
-            padding: 0.85rem 1.1rem !important;
-            box-shadow: 0 14px 34px rgba(0, 209, 255, 0.16) !important;
+            font-weight: 950 !important;
+            border-radius: 22px !important;
+            padding: 1.35rem 1.4rem !important;
+            min-height: 74px !important;
+            font-size: 1.12rem !important;
+            letter-spacing: 0.02em !important;
+            box-shadow: 0 18px 44px rgba(0, 209, 255, 0.22), 0 12px 28px rgba(48, 209, 88, 0.16) !important;
+        }}
+
+        div[data-testid="stDownloadButton"] > button[kind="secondary"]:hover {{
+            transform: translateY(-1px);
+            filter: brightness(1.06);
         }}
 
         @media (max-width: 1100px) {{
@@ -943,6 +951,10 @@ def plot_cashflow_schedule(result: dict) -> go.Figure:
         + grouped["ingreso_recurrente"]
         + grouped["egreso_recurrente"]
     )
+    # Si el neto mensual es negativo, esa diferencia debe salir del patrimonio invertido.
+    # Se grafica bajo cero para que se lea como uso/retiro adicional del fondo.
+    grouped["monto_que_saca_del_fondo"] = np.minimum(grouped["neto_mensual_recurrente"], 0.0)
+    grouped["monto_que_saca_del_fondo_abs"] = -grouped["monto_que_saca_del_fondo"]
 
     fig = go.Figure()
     bar_series = [
@@ -972,6 +984,21 @@ def plot_cashflow_schedule(result: dict) -> go.Figure:
             line={"width": 4, "color": COLOR_PRIMARY_2},
             marker={"size": 7, "color": COLOR_PRIMARY_2},
             hovertemplate="Edad %{x}<br>Neto mensual $%{y:,.0f}<extra></extra>",
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=grouped["edad"],
+            y=grouped["monto_que_saca_del_fondo"],
+            name="Monto que debe salir del fondo",
+            mode="lines+markers",
+            line={"width": 5, "color": COLOR_ORANGE, "dash": "dash"},
+            marker={"size": 8, "color": COLOR_ORANGE},
+            fill="tozeroy",
+            fillcolor="rgba(255, 184, 77, 0.12)",
+            hovertemplate="Edad %{x}<br>Debe salir del fondo $%{customdata:,.0f}<extra></extra>",
+            customdata=grouped["monto_que_saca_del_fondo_abs"],
         )
     )
 
@@ -1028,9 +1055,17 @@ def plot_cashflow_schedule(result: dict) -> go.Figure:
             COLOR_PRIMARY_2,
             yshift=0,
         )
+        add_value_annotation(
+            fig,
+            final_age,
+            float(final["monto_que_saca_del_fondo"]),
+            f"sale del fondo<br>{fmt_clp(final['monto_que_saca_del_fondo_abs'])}",
+            COLOR_ORANGE,
+            yshift=-62,
+        )
 
     fig.update_layout(
-        title="Flujo mensual promedio por edad: entradas, salidas y brecha que cubre el patrimonio",
+        title="Flujo mensual promedio por edad: entradas, salidas y monto que debe salir del fondo",
         xaxis_title="Edad",
         yaxis_title="Flujo mensual / flujo esporádico anual (CLP)",
         hovermode="x unified",
@@ -1044,7 +1079,7 @@ def plot_cashflow_schedule(result: dict) -> go.Figure:
         y=1.10,
         showarrow=False,
         align="left",
-        text="Barras sobre cero = plata que entra. Barras bajo cero = plata que sale. Línea morada = neto mensual recurrente antes del retorno. Diamantes = flujos únicos del año.",
+        text="Barras sobre cero = plata que entra. Barras bajo cero = plata que sale. Línea naranja punteada = diferencia que debe salir del fondo cuando los ingresos no cubren retiros/gastos. Diamantes = flujos únicos del año.",
         font={"size": 12, "color": COLOR_MUTED},
     )
     return apply_plot_theme(fig)
@@ -1582,8 +1617,9 @@ def run_minimum_saving_calculator(
     """Busca el ahorro mensual central mínimo para cumplir meta y no quebrar.
 
     El ahorro probado se interpreta como pesos de hoy si el modelo tiene activada
-    la indexación del ahorro. El motor usa una banda triangular automática de
-    ±$500.000 alrededor del monto central, igual que la interfaz principal.
+    la indexación del ahorro. El motor interpreta el monto como ahorro objetivo:
+    80% de meses normales entre objetivo-$500.000 y objetivo, 15% de meses malos
+    bajo ese rango y 5% de meses muy buenos hasta objetivo+$500.000.
     
     Criterio de éxito conjunto:
       1) patrimonio al inicio del retiro >= meta, y
@@ -1769,6 +1805,7 @@ def make_monthly_cashflow_table(result: dict) -> pd.DataFrame:
         + out["flujo_esporadico_clp"]
         - out["retiro_clp"]
     )
+    out["monto_que_debe_salir_del_fondo_clp"] = np.maximum(-out["flujo_neto_antes_retorno_clp"], 0)
     return out
 
 
@@ -2036,7 +2073,7 @@ def make_executive_excel_report(
         ws = add_sheet("02 Flujos")
         write_title(ws, "Tabla de flujos", "Resume cuánta plata entra y sale por edad. Las cifras se muestran en CLP nominales de cada año/edad.")
         ws.set_column("A:A", 14)
-        ws.set_column("B:H", 22)
+        ws.set_column("B:I", 22)
         flows = make_monthly_cashflow_table(result)
         flows_by_age = flows.groupby("año_edad", as_index=False).agg(
             ahorro_promedio_simulado_clp=("ahorro_promedio_simulado_clp", "sum"),
@@ -2044,6 +2081,7 @@ def make_executive_excel_report(
             flujo_recurrente_neto_clp=("flujo_recurrente_neto_clp", "sum"),
             flujo_esporadico_clp=("flujo_esporadico_clp", "sum"),
             flujo_neto_antes_retorno_clp=("flujo_neto_antes_retorno_clp", "sum"),
+            monto_que_debe_salir_del_fondo_clp=("monto_que_debe_salir_del_fondo_clp", "sum"),
         )
         flows_by_age.rename(columns={"año_edad": "edad"}, inplace=True)
         r = write_table(
@@ -2051,13 +2089,14 @@ def make_executive_excel_report(
             flows_by_age,
             4,
             title="Flujos anuales por edad",
-            money_cols={"ahorro_promedio_simulado_clp", "retiro_clp", "flujo_recurrente_neto_clp", "flujo_esporadico_clp", "flujo_neto_antes_retorno_clp"},
+            money_cols={"ahorro_promedio_simulado_clp", "retiro_clp", "flujo_recurrente_neto_clp", "flujo_esporadico_clp", "flujo_neto_antes_retorno_clp", "monto_que_debe_salir_del_fondo_clp"},
             int_cols={"edad"},
         )
         # Formato condicional para flujo neto.
         last_row = 6 + len(flows_by_age)
         ws.conditional_format(6, 5, last_row, 5, {"type": "cell", "criteria": ">=", "value": 0, "format": fmt_good})
         ws.conditional_format(6, 5, last_row, 5, {"type": "cell", "criteria": "<", "value": 0, "format": fmt_bad})
+        ws.conditional_format(6, 6, last_row, 6, {"type": "cell", "criteria": ">", "value": 0, "format": fmt_warn})
         # Gráfico ejecutivo de flujos anuales.
         if len(flows_by_age) > 0:
             chart = wb.add_chart({"type": "line"})
@@ -2081,7 +2120,13 @@ def make_executive_excel_report(
                 "values": ["02 Flujos", data_first, 5, data_last, 5],
                 "line": {"color": "#00D1FF", "width": 2.75},
             })
-            chart.set_title({"name": "Flujos anuales del escenario"})
+            chart.add_series({
+                "name": "Monto que debe salir del fondo",
+                "categories": ["02 Flujos", data_first, 0, data_last, 0],
+                "values": ["02 Flujos", data_first, 6, data_last, 6],
+                "line": {"color": "#FFB84D", "width": 3.00, "dash_type": "dash"},
+            })
+            chart.set_title({"name": "Flujos anuales y uso del fondo"})
             chart.set_x_axis({"name": "Edad"})
             chart.set_y_axis({"name": "CLP nominal"})
             chart.set_legend({"position": "bottom"})
@@ -2388,7 +2433,7 @@ with st.form("formulario_simulacion"):
     with input_tabs[1]:
         panel_start(
             "Ahorro mensual por edad",
-            "Define tramos de ahorro antes del retiro. En cada tramo ingresas el ahorro esperado en pesos de hoy; la simulación aplica automáticamente una banda triangular de ±$500.000 y desde la edad de retiro el ahorro queda en cero.",
+            "Define tramos de ahorro antes del retiro. En cada tramo ingresas el ahorro objetivo mensual en pesos de hoy; la mayoría de los meses queda entre ese monto y $500.000 menos, algunos meses son peores y pocos meses superan el objetivo hasta $500.000.",
         )
         t1, t2 = st.columns([1, 1])
         with t1:
@@ -2454,8 +2499,8 @@ with st.form("formulario_simulacion"):
                     help="El motor corta automáticamente el ahorro en la edad de retiro aunque pongas una edad mayor.",
                 ),
                 "ahorro_esperado_clp": st.column_config.TextColumn(
-                    "Ahorro esperado CLP",
-                    help="Ej: 3.000.000. El mínimo/máximo simulado será este monto ±$500.000.",
+                    "Ahorro objetivo CLP",
+                    help="Ej: 3.000.000. Mes normal típico: entre 2.500.000 y 3.000.000; pocos meses buenos pueden llegar a 3.500.000.",
                 ),
             },
         )
@@ -2762,8 +2807,8 @@ def parse_saving_ranges(df: pd.DataFrame, edad_inicial_: int, edad_retiro_: int)
     """Convierte la tabla de tramos de ahorro a MM CLP para el motor.
 
     Formato actual de UI:
-      - ahorro_esperado_clp: monto central por tramo.
-      - el motor usa una banda automática de ±$500.000.
+      - ahorro_esperado_clp: ahorro objetivo por tramo.
+      - el motor usa una mezcla asimétrica: 80% normal entre objetivo-$500.000 y objetivo; 15% malo; 5% muy bueno.
 
     También mantiene compatibilidad con versiones antiguas que tenían
     ahorro_min_clp / ahorro_probable_clp / ahorro_max_clp.
@@ -3286,37 +3331,6 @@ with tab6:
     if analysis is None:
         st.warning("Presiona **Calcular FIRE / Coast / matriz realista** para generar el análisis.")
     else:
-        excel_fire_report = make_executive_excel_report(
-            result,
-            tabla,
-            st.session_state.get("mc_saving_ranges_df"),
-            st.session_state.get("mc_recurring_df"),
-            st.session_state.get("mc_lump_df"),
-            st.session_state.get("mc_afp_info"),
-            analysis,
-        )
-        st.markdown(
-            """
-            <div class="excel-export-hero">
-                <div>
-                    <div class="excel-export-title">Reporte ejecutivo del escenario</div>
-                    <div class="excel-export-subtitle">Un solo archivo Excel con inputs, flujos, FIRE, Coast FIRE, matriz realista, percentiles y gráficos para explicar la simulación.</div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.download_button(
-            "⬇️ Descargar reporte ejecutivo Excel completo",
-            data=excel_fire_report,
-            file_name="reporte_fire_cliente.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="Archivo único con colores, tablas explicativas, matriz FIRE y gráficos.",
-            key="download_excel_fire_unico",
-            width="stretch",
-        )
-        st.divider()
-
         fire_scan_df = analysis.get("fire_scan", pd.DataFrame())
         realistic_matrix_clp = analysis.get("realistic_matrix_clp", pd.DataFrame())
         required_matrix = analysis.get("required_matrix")
@@ -3403,6 +3417,37 @@ with tab6:
         st.plotly_chart(plot_realistic_required_capital_heatmap(realistic_matrix_clp), width="stretch")
         st.dataframe(format_realistic_matrix_clp(realistic_matrix_clp), width="stretch")
 
+        excel_fire_report = make_executive_excel_report(
+            result,
+            tabla,
+            st.session_state.get("mc_saving_ranges_df"),
+            st.session_state.get("mc_recurring_df"),
+            st.session_state.get("mc_lump_df"),
+            st.session_state.get("mc_afp_info"),
+            analysis,
+        )
+        st.markdown(
+            """
+            <div class="excel-export-hero">
+                <div>
+                    <div class="excel-export-title">Descarga el reporte ejecutivo completo</div>
+                    <div class="excel-export-subtitle">Un solo Excel con inputs, flujos, FIRE, Coast FIRE, matriz realista, percentiles y gráficos. Ideal para entregar o revisar el escenario con alguien que no mira el código.</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.download_button(
+            "⬇️ DESCARGAR EXCEL EJECUTIVO COMPLETO",
+            data=excel_fire_report,
+            file_name="reporte_fire_cliente.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Archivo único con colores, tablas explicativas, matriz FIRE y gráficos.",
+            key="download_excel_fire_unico",
+            width="stretch",
+        )
+        st.divider()
+
         st.markdown("#### Auditoría por edad")
         audit = fire_scan_df.copy()
         if not audit.empty:
@@ -3443,7 +3488,7 @@ with tab7:
     )
     st.info(
         "Esta calculadora usa los mismos supuestos del escenario principal: capital inicial, edad de retiro, retiro mensual deseado, inflación, AFP, arriendos, eventos únicos y retornos. "
-        "Solo reemplaza los tramos de ahorro por un ahorro mensual único calculado automáticamente con banda triangular de ±$500.000."
+        "Solo reemplaza los tramos de ahorro por un ahorro objetivo mensual único; el motor aplica la mezcla realista asimétrica."
     )
 
     calc_cols = st.columns([1.1, 1.1, 1.1, 1.1])
@@ -3455,9 +3500,10 @@ with tab7:
             help="Se exige cumplir simultáneamente la meta de patrimonio al retiro y no agotar el patrimonio hasta los 90.",
         )
     with calc_cols[1]:
-        calc_max_saving_clp = money_input(
+        calc_max_saving_clp = money_text_input(
             "Ahorro máximo a probar",
             8_000_000,
+            key="calc_max_saving_clp",
             help="Si ni este ahorro alcanza, la calculadora marcará que no alcanza con los supuestos actuales.",
         )
     with calc_cols[2]:
@@ -3470,9 +3516,10 @@ with tab7:
             format="%d",
         )
     with calc_cols[3]:
-        calc_precision_clp = money_input(
+        calc_precision_clp = money_text_input(
             "Precisión aproximada",
             50_000,
+            key="calc_precision_clp",
             help="La búsqueda binaria se detiene cerca de este orden de magnitud. Montos más finos tardan más.",
         )
 
@@ -3516,7 +3563,7 @@ with tab7:
                 metric_card(
                     "Ahorro mensual mínimo",
                     fmt_clp(best.get("saving_center_clp", np.nan)),
-                    "Monto central en pesos de hoy. El motor usa ±$500.000 alrededor.",
+                    "Ahorro objetivo en pesos de hoy. La mayoría de los meses queda entre este monto y $500.000 menos; pocos meses superan el objetivo.",
                     "good",
                 )
             with rcols[1]:

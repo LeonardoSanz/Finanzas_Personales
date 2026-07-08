@@ -149,7 +149,7 @@ def monte_carlo_accumulation_withdrawal_mm(
     Simula patrimonio en MM CLP con dos fases:
 
     1) Acumulación: ahorro mensual positivo hasta edad_inicio_retiro.
-       El ahorro puede ser un único triangular global o tramos por edad.
+       El ahorro puede ser global o por tramos de edad; se simula con una mezcla asimétrica conservadora.
     2) Retiro: ahorro mensual = 0 y retiro fijo mensual desde edad_inicio_retiro.
 
     Esta versión evita guardar matrices gigantes de retornos/ahorros. Solo guarda paths,
@@ -303,7 +303,7 @@ def monte_carlo_accumulation_withdrawal_mm(
     # -----------------------------
     # Rangos de ahorro por edad
     # Formato: (edad_inicio, edad_fin_opcional, ahorro_min_mm, ahorro_mode_mm, ahorro_max_mm, descripción)
-    # Si no se informa, se usa el triangular global. Desde edad_inicio_retiro el ahorro siempre queda en cero.
+    # Si no se informa, se usa el ahorro global. Desde edad_inicio_retiro el ahorro siempre queda en cero.
     # -----------------------------
     saving_min_schedule = np.zeros(months, dtype=np.float64)
     saving_mode_schedule = np.zeros(months, dtype=np.float64)
@@ -444,12 +444,43 @@ def monte_carlo_accumulation_withdrawal_mm(
         monthly_return_mean[t] = float(np.mean(r_t))
 
         if t < retirement_start_month and saving_max_schedule[t] > 0:
-            savings_t = rng.triangular(
-                left=saving_min_schedule[t],
-                mode=saving_mode_schedule[t],
-                right=saving_max_schedule[t],
-                size=n_paths,
-            ).astype(np.float32, copy=False)
+            # Modelo de ahorro realista y asimétrico.
+            # El monto ingresado por el usuario se interpreta como "ahorro objetivo".
+            # Si el objetivo es $3,0 MM:
+            #   - 80% de los meses: mes normal entre $2,5 MM y $3,0 MM.
+            #   - 15% de los meses: mes malo entre $0 y $2,5 MM.
+            #   - 5% de los meses: mes muy bueno entre $3,0 MM y $3,5 MM.
+            # Esto evita sobrestimar meses buenos imposibles y captura que es más
+            # probable ahorrar menos que superar el objetivo.
+            low_t = float(saving_min_schedule[t])
+            target_t = float(saving_mode_schedule[t])
+            high_t = float(saving_max_schedule[t])
+
+            u = rng.random(n_paths)
+            savings_t = np.empty(n_paths, dtype=np.float32)
+
+            mask_bad = u < 0.15
+            mask_normal = (u >= 0.15) & (u < 0.95)
+            mask_good = u >= 0.95
+
+            if np.any(mask_bad):
+                savings_t[mask_bad] = rng.uniform(
+                    0.0,
+                    max(low_t, 0.0),
+                    size=int(np.sum(mask_bad)),
+                ).astype(np.float32, copy=False)
+            if np.any(mask_normal):
+                savings_t[mask_normal] = rng.uniform(
+                    min(low_t, target_t),
+                    max(low_t, target_t),
+                    size=int(np.sum(mask_normal)),
+                ).astype(np.float32, copy=False)
+            if np.any(mask_good):
+                savings_t[mask_good] = rng.uniform(
+                    min(target_t, high_t),
+                    max(target_t, high_t),
+                    size=int(np.sum(mask_good)),
+                ).astype(np.float32, copy=False)
         else:
             savings_t = np.zeros(n_paths, dtype=np.float32)
 
