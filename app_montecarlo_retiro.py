@@ -701,84 +701,192 @@ def inject_css() -> None:
 
 
 def install_clp_input_formatter() -> None:
-    """Formatea campos monetarios CLP en tiempo real en el navegador.
+    """Formatea montos CLP en tiempo real, incluidos los editores de tabla.
 
-    Streamlit procesa los valores monetarios como texto para poder aceptar entradas como
-    1000000, 1.000.000 o 3 MM. Este script mejora la experiencia: cuando el usuario
-    escribe solo dígitos, el navegador inserta puntos de miles al instante.
+    Los inputs monetarios principales y las celdas de ``st.data_editor`` pueden
+    recibir valores sin puntuación (por ejemplo, 3000000). El script agrega los
+    puntos de miles mientras se escribe. En tablas solo interviene cuando el
+    contenido es numérico; por lo tanto, no altera descripciones u otros textos.
     """
     components.html(
         r"""
         <script>
         (function () {
             const doc = window.parent.document;
+            const TEXT_EDITORS = 'input[type="text"], textarea, [contenteditable="true"]';
+            let lastGridInteractionAt = 0;
+
+            function getEditorValue(editor) {
+                if (editor.isContentEditable) return editor.textContent || "";
+                return editor.value || "";
+            }
 
             function formatThousandsCLP(raw) {
                 if (raw === null || raw === undefined) return "";
                 const value = String(raw);
-                // Si el usuario escribe una abreviación tipo "3 MM", no interferimos.
+
+                // Se mantiene la posibilidad de pegar abreviaciones como "3 MM".
                 if (/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/.test(value)) return value;
-                const isNegative = value.trim().startsWith("-");
+
+                const trimmed = value.trim();
+                if (trimmed === "") return "";
+                const isNegative = trimmed.startsWith("-");
                 const digits = value.replace(/\D/g, "");
                 if (!digits) return "";
                 const formatted = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
                 return (isNegative ? "-" : "") + formatted;
             }
 
-            function nativeSetValue(input, value) {
-                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                setter.call(input, value);
+            function isNumericLike(value) {
+                const text = String(value || "").trim();
+                return text === "" || /^-?[0-9.$,\s]+$/.test(text);
             }
 
-            function shouldFormatInput(input) {
-                if (!input || input.type !== "text") return false;
-                if (input.dataset.clpFormatterAttached === "1") return false;
-                const ph = input.getAttribute("placeholder") || "";
-                const aria = input.getAttribute("aria-label") || "";
-                const labelText = input.closest("label") ? input.closest("label").innerText : "";
-                const txt = `${ph} ${aria} ${labelText}`.toLowerCase();
+            function setNativeValue(editor, value) {
+                if (editor.isContentEditable) {
+                    editor.textContent = value;
+                    return;
+                }
+                const proto = editor.tagName === "TEXTAREA"
+                    ? window.HTMLTextAreaElement.prototype
+                    : window.HTMLInputElement.prototype;
+                const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+                if (descriptor && descriptor.set) descriptor.set.call(editor, value);
+                else editor.value = value;
+            }
+
+            function moneyHint(editor) {
+                const placeholder = editor.getAttribute("placeholder") || "";
+                const aria = editor.getAttribute("aria-label") || "";
+                const title = editor.getAttribute("title") || "";
+                const labelText = editor.closest("label") ? editor.closest("label").innerText : "";
+                const txt = `${placeholder} ${aria} ${title} ${labelText}`.toLowerCase();
                 return (
-                    ph.includes("1.000.000.000") ||
+                    placeholder.includes("1.000.000.000") ||
                     txt.includes("clp") ||
+                    txt.includes("monto mensual") ||
+                    txt.includes("monto evento") ||
+                    txt.includes("ahorro objetivo") ||
                     txt.includes("ahorro máximo") ||
-                    txt.includes("precision aproximada") ||
-                    txt.includes("precisión aproximada")
+                    txt.includes("capital inicial") ||
+                    txt.includes("retiro mensual") ||
+                    txt.includes("saldo afp") ||
+                    txt.includes("precisión aproximada") ||
+                    txt.includes("precision aproximada")
                 );
             }
 
-            function attachFormatter(input) {
-                if (!shouldFormatInput(input)) return;
-                input.dataset.clpFormatterAttached = "1";
-                input.setAttribute("inputmode", "numeric");
-                input.setAttribute("autocomplete", "off");
-
-                const applyFormat = () => {
-                    if (input.dataset.clpFormatting === "1") return;
-                    const current = input.value || "";
-                    const formatted = formatThousandsCLP(current);
-                    if (formatted === current) return;
-                    input.dataset.clpFormatting = "1";
-                    nativeSetValue(input, formatted);
-                    input.dispatchEvent(new Event("input", { bubbles: true }));
-                    input.dispatchEvent(new Event("change", { bubbles: true }));
-                    input.dataset.clpFormatting = "0";
-                    try {
-                        const end = input.value.length;
-                        input.setSelectionRange(end, end);
-                    } catch (e) {}
-                };
-
-                input.addEventListener("input", applyFormat);
-                input.addEventListener("blur", applyFormat);
-                applyFormat();
+            function hasGridAncestry(editor) {
+                const classes = String(editor.className || "").toLowerCase();
+                const gridAncestor = editor.closest(
+                    '[data-testid*="DataFrame"], [data-testid*="dataframe"], ' +
+                    '[data-testid*="DataEditor"], [data-testid*="data_editor"], ' +
+                    '[role="grid"], [class*="gdg"], [class*="glide"]'
+                );
+                return Boolean(
+                    gridAncestor ||
+                    classes.includes("gdg") ||
+                    classes.includes("glide")
+                );
             }
 
-            function scanInputs() {
-                doc.querySelectorAll('input[type="text"]').forEach(attachFormatter);
+            function isInsideGridEditor(editor) {
+                return Boolean(
+                    editor.dataset.clpGridEditor === "1" ||
+                    hasGridAncestry(editor) ||
+                    (Date.now() - lastGridInteractionAt) < 4000
+                );
             }
 
-            scanInputs();
-            const observer = new MutationObserver(scanInputs);
+            function shouldFormatEditor(editor) {
+                if (!editor || !editor.matches(TEXT_EDITORS)) return false;
+                if (moneyHint(editor)) return true;
+                return isInsideGridEditor(editor) && isNumericLike(getEditorValue(editor));
+            }
+
+            function applyFormat(editor) {
+                if (!shouldFormatEditor(editor)) return;
+                if (editor.dataset.clpFormatting === "1") return;
+
+                const current = getEditorValue(editor);
+                if (!isNumericLike(current)) return;
+                const formatted = formatThousandsCLP(current);
+                if (formatted === current) return;
+
+                editor.dataset.clpFormatting = "1";
+                setNativeValue(editor, formatted);
+                editor.dispatchEvent(new Event("input", { bubbles: true }));
+                editor.dispatchEvent(new Event("change", { bubbles: true }));
+                editor.dataset.clpFormatting = "0";
+
+                try {
+                    if (!editor.isContentEditable) {
+                        const end = getEditorValue(editor).length;
+                        editor.setSelectionRange(end, end);
+                    }
+                } catch (e) {}
+            }
+
+            function attachFormatter(editor) {
+                if (!editor || editor.dataset.clpFormatterAttached === "1") return;
+                editor.dataset.clpFormatterAttached = "1";
+                if (hasGridAncestry(editor) || (Date.now() - lastGridInteractionAt) < 4000) {
+                    editor.dataset.clpGridEditor = "1";
+                }
+                editor.setAttribute("autocomplete", "off");
+
+                editor.addEventListener("input", function () {
+                    window.requestAnimationFrame(() => applyFormat(editor));
+                });
+                editor.addEventListener("blur", function () { applyFormat(editor); });
+                applyFormat(editor);
+            }
+
+            function scanEditors(root) {
+                const base = root && root.querySelectorAll ? root : doc;
+                base.querySelectorAll(TEXT_EDITORS).forEach(attachFormatter);
+                if (root && root.matches && root.matches(TEXT_EDITORS)) attachFormatter(root);
+            }
+
+            // Glide Data Grid abre el editor de celda en un portal separado del canvas.
+            // Recordar la interacción con la tabla permite reconocer ese editor aunque
+            // no herede directamente el aria-label de la columna.
+            doc.addEventListener("pointerdown", function (event) {
+                const target = event.target;
+                if (!target || !target.closest) return;
+                const grid = target.closest(
+                    '[data-testid*="DataFrame"], [data-testid*="dataframe"], ' +
+                    '[data-testid*="DataEditor"], [role="grid"], canvas'
+                );
+                if (grid) lastGridInteractionAt = Date.now();
+            }, true);
+
+            doc.addEventListener("focusin", function (event) {
+                const editor = event.target;
+                if (!editor || !editor.matches || !editor.matches(TEXT_EDITORS)) return;
+                if (hasGridAncestry(editor) || (Date.now() - lastGridInteractionAt) < 4000) {
+                    editor.dataset.clpGridEditor = "1";
+                }
+                attachFormatter(editor);
+            }, true);
+
+            // Respaldo global: captura el primer dígito incluso cuando el editor de la
+            // tabla fue creado después del último escaneo del MutationObserver.
+            doc.addEventListener("input", function (event) {
+                const editor = event.target;
+                if (!editor || !editor.matches || !editor.matches(TEXT_EDITORS)) return;
+                if (!shouldFormatEditor(editor)) return;
+                window.requestAnimationFrame(() => applyFormat(editor));
+            }, true);
+
+            scanEditors(doc);
+            const observer = new MutationObserver(function (mutations) {
+                mutations.forEach(function (mutation) {
+                    mutation.addedNodes.forEach(function (node) {
+                        if (node.nodeType === 1) scanEditors(node);
+                    });
+                });
+            });
             observer.observe(doc.body, { childList: true, subtree: true });
         })();
         </script>
