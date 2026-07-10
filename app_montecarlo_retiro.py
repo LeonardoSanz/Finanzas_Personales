@@ -25,6 +25,7 @@ from montecarlo_engine import (
 # ============================================================
 
 COLOR_BG = "#041F5F"
+FIRE_ANALYSIS_VERSION = "sustainable_withdrawal_by_age_v3"
 COLOR_BG_2 = "#061844"
 COLOR_CARD = "#0B1F4A"
 COLOR_CARD_2 = "#102B66"
@@ -1975,7 +1976,7 @@ def lump_age_events_to_monthly_from_start(lump_age_events: tuple | None, start_a
 
 
 
-def run_retirement_age_4pct_sensitivity(
+def run_sustainable_withdrawal_by_retirement_age(
     *,
     base_result: dict,
     saving_ranges: tuple | None,
@@ -1985,9 +1986,9 @@ def run_retirement_age_4pct_sensitivity(
     n_paths: int,
     withdrawal_rate_annual: float = 0.04,
 ) -> pd.DataFrame:
-    """Calcula retiro sostenible por edad de jubilación.
+    """Calcula retiro máximo sostenible por edad de jubilación.
 
-    Esta función reemplaza la antigua sensibilidad puramente basada en la regla del 4%.
+    Para cada edad se busca por simulación el retiro real máximo viable.
     Para cada edad posible de jubilación, busca por bisección el mayor retiro mensual
     expresado en pesos de hoy que permite llegar a los 90 años con al menos el umbral
     objetivo de éxito. El benchmark 4% se mantiene solo como referencia secundaria.
@@ -2113,7 +2114,7 @@ def run_retirement_age_4pct_sensitivity(
     return pd.DataFrame(rows)
 
 
-def format_retirement_4pct_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
+def format_sustainable_withdrawal_by_retirement_age(df: pd.DataFrame) -> pd.DataFrame:
     """Formatea la tabla de retiro sostenible por edad para pantalla."""
     if df is None or df.empty:
         return pd.DataFrame()
@@ -2128,8 +2129,6 @@ def format_retirement_4pct_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
         "Primer retiro sostenible nominal",
         "Retiro deseado mensual pesos de hoy",
         "Brecha vs retiro deseado",
-        "Retiro mensual 4% pesos de hoy",
-        "Retiro mensual 4% nominal",
         "Prob. no agotar hasta 90",
         "Edad mediana agotamiento si falla",
     ]
@@ -2141,8 +2140,6 @@ def format_retirement_4pct_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
         "Primer retiro sostenible nominal",
         "Retiro deseado mensual pesos de hoy",
         "Brecha vs retiro deseado",
-        "Retiro mensual 4% pesos de hoy",
-        "Retiro mensual 4% nominal",
     ]
     for col in money_cols:
         if col in display.columns:
@@ -2154,8 +2151,8 @@ def format_retirement_4pct_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
     return display
 
 
-def style_retirement_4pct_sensitivity(df: pd.DataFrame):
-    display = format_retirement_4pct_sensitivity(df)
+def style_sustainable_withdrawal_by_retirement_age(df: pd.DataFrame):
+    display = format_sustainable_withdrawal_by_retirement_age(df)
     if df is None or df.empty:
         return display
     estados = list(df.get("Estado", pd.Series([""] * len(df))))
@@ -2456,7 +2453,7 @@ def make_executive_excel_report(
         fire_scan = safe_df(fire_analysis.get("fire_scan") if fire_analysis else None)
         coast_scan = safe_df(fire_analysis.get("coast_scan") if fire_analysis else None)
         realistic_matrix = safe_df(fire_analysis.get("realistic_matrix_clp") if fire_analysis else None)
-        retirement_4pct = safe_df(fire_analysis.get("retirement_4pct_sensitivity") if fire_analysis else None)
+        retirement_sustainable = safe_df(fire_analysis.get("sustainable_withdrawal_by_age") if fire_analysis else None)
         target_success_pct = float(fire_analysis.get("target_success_pct", 90.0)) if fire_analysis else 90.0
         fire_row = find_fire_row(fire_scan, target_success_pct) if not fire_scan.empty else None
         coast_row = None
@@ -2718,9 +2715,9 @@ def make_executive_excel_report(
         # 06 Retiro sostenible
         # ----------------------------------------------------
         ws = add_sheet("06 Retiro sostenible")
-        write_title(ws, "Retiro sostenible por edad de jubilación", "Para cada edad se busca por simulación el retiro mensual máximo en pesos de hoy que permite llegar a los 90 con la probabilidad objetivo. La regla 4% queda solo como benchmark.")
-        if not retirement_4pct.empty:
-            ret4 = retirement_4pct.copy()
+        write_title(ws, "Retiro sostenible por edad de jubilación", "Para cada edad se busca por simulación el retiro mensual máximo en pesos de hoy que permite llegar a los 90 con la probabilidad objetivo. La regla 4% queda solo como referencia secundaria en el Excel.")
+        if not retirement_sustainable.empty:
+            ret4 = retirement_sustainable.copy()
             if "Prob. no agotar hasta 90" in ret4.columns:
                 ret4["Probabilidad no agotar"] = ret4["Prob. no agotar hasta 90"] / 100
                 ret4 = ret4.drop(columns=["Prob. no agotar hasta 90"])
@@ -3715,20 +3712,6 @@ with tab6:
             "orange",
         )
 
-    st.markdown("#### Calendario del plan por edad")
-    st.caption(
-        "Tabla anual con los hitos principales del escenario. Los colores ayudan a leer eventos de vida/ahorro, flujos únicos, inicio de retiro, arriendos, AFP y eventuales zonas de agotamiento."
-    )
-    timeline_df = build_event_timeline_table(
-        result,
-        tabla,
-        st.session_state.get("mc_saving_ranges_df"),
-        st.session_state.get("mc_recurring_df"),
-        st.session_state.get("mc_lump_df"),
-        st.session_state.get("mc_afp_info"),
-    )
-    st.dataframe(style_event_timeline_table(timeline_df), width="stretch", hide_index=True)
-
     mx1, mx2, mx3, mx4 = st.columns([2.2, 1.4, 1.4, 1.2])
     with mx1:
         default_matrix_ages = [35, 37, 40, 43, 45, 48, 50, 55, 60, 65]
@@ -3839,7 +3822,7 @@ with tab6:
 
                 # Umbral usado por la tabla de retiro sostenible por edad.
                 st.session_state["mc_fire_analysis_target_success_pct"] = float(fire_target_success_pct)
-                sensitivity_4pct_df = run_retirement_age_4pct_sensitivity(
+                sustainable_withdrawal_df = run_sustainable_withdrawal_by_retirement_age(
                     base_result=result,
                     saving_ranges=saving_ranges_for_scan,
                     recurring_events=recurring_events_for_scan,
@@ -3854,8 +3837,9 @@ with tab6:
                     "realistic_matrix_clp": realistic_matrix,
                     "fire_scan": fire_scan_df,
                     "coast_scan": coast_df,
-                    "retirement_4pct_sensitivity": sensitivity_4pct_df,
+                    "sustainable_withdrawal_by_age": sustainable_withdrawal_df,
                     "target_success_pct": float(fire_target_success_pct),
+                    "analysis_version": FIRE_ANALYSIS_VERSION,
                     "planned_fire_age": planned_fire_age,
                     "planned_fire_success_pct": float(result["prob_no_ruin"] * 100),
                     "ages": matrix_ages,
@@ -3866,8 +3850,11 @@ with tab6:
                 st.success("Análisis FIRE / Coast / matriz calculado.")
 
     analysis = st.session_state.get("mc_fire_analysis")
+    if analysis is not None and analysis.get("analysis_version") != FIRE_ANALYSIS_VERSION:
+        st.session_state.pop("mc_fire_analysis", None)
+        analysis = None
     if analysis is None:
-        st.warning("Presiona **Calcular FIRE / Coast / matriz realista** para generar el análisis.")
+        st.warning("Presiona **Calcular FIRE / Coast / matriz realista** para generar el análisis actualizado.")
     else:
         fire_scan_df = analysis.get("fire_scan", pd.DataFrame())
         realistic_matrix_clp = analysis.get("realistic_matrix_clp", pd.DataFrame())
@@ -3955,15 +3942,15 @@ with tab6:
         st.plotly_chart(plot_realistic_required_capital_heatmap(realistic_matrix_clp), width="stretch")
         st.dataframe(format_realistic_matrix_clp(realistic_matrix_clp), width="stretch")
 
-        st.markdown("#### Retiro sostenible por edad de jubilación")
+        st.markdown("#### NUEVO · Retiro máximo sostenible por edad de jubilación")
         st.caption(
-            "Evalúa todas las edades desde tu edad actual hasta 89. Para cada edad busca por simulación el retiro mensual máximo —expresado en pesos de hoy— que permitiría llegar a los 90 con la probabilidad objetivo. También muestra el primer retiro nominal de esa edad y una referencia secundaria basada en 4%."
+            "Esta ya no es una tabla 4%. Para cada edad posible de jubilación se corre una búsqueda por simulación: encuentra el retiro mensual máximo en pesos de hoy que permite llegar a los 90 con la probabilidad objetivo. Luego lo compara contra tu retiro mensual deseado y muestra si Alcanza, Cerca o No alcanza."
         )
-        sensitivity_4pct_df = analysis.get("retirement_4pct_sensitivity", pd.DataFrame())
-        if sensitivity_4pct_df is None or sensitivity_4pct_df.empty:
+        sustainable_withdrawal_df = analysis.get("sustainable_withdrawal_by_age", pd.DataFrame())
+        if sustainable_withdrawal_df is None or sustainable_withdrawal_df.empty:
             st.info("La tabla de retiro sostenible no está disponible todavía. Vuelve a calcular FIRE / Coast / matriz.")
         else:
-            st.dataframe(style_retirement_4pct_sensitivity(sensitivity_4pct_df), width="stretch", hide_index=True, height=650)
+            st.dataframe(style_sustainable_withdrawal_by_retirement_age(sustainable_withdrawal_df), width="stretch", hide_index=True, height=760)
 
         excel_fire_report = make_executive_excel_report(
             result,
