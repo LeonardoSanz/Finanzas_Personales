@@ -10,6 +10,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 import plotly.express as px
 
@@ -696,6 +697,94 @@ def inject_css() -> None:
         </style>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def install_clp_input_formatter() -> None:
+    """Formatea campos monetarios CLP en tiempo real en el navegador.
+
+    Streamlit procesa los valores monetarios como texto para poder aceptar entradas como
+    1000000, 1.000.000 o 3 MM. Este script mejora la experiencia: cuando el usuario
+    escribe solo dígitos, el navegador inserta puntos de miles al instante.
+    """
+    components.html(
+        r"""
+        <script>
+        (function () {
+            const doc = window.parent.document;
+
+            function formatThousandsCLP(raw) {
+                if (raw === null || raw === undefined) return "";
+                const value = String(raw);
+                // Si el usuario escribe una abreviación tipo "3 MM", no interferimos.
+                if (/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/.test(value)) return value;
+                const isNegative = value.trim().startsWith("-");
+                const digits = value.replace(/\D/g, "");
+                if (!digits) return "";
+                const formatted = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+                return (isNegative ? "-" : "") + formatted;
+            }
+
+            function nativeSetValue(input, value) {
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                setter.call(input, value);
+            }
+
+            function shouldFormatInput(input) {
+                if (!input || input.type !== "text") return false;
+                if (input.dataset.clpFormatterAttached === "1") return false;
+                const ph = input.getAttribute("placeholder") || "";
+                const aria = input.getAttribute("aria-label") || "";
+                const labelText = input.closest("label") ? input.closest("label").innerText : "";
+                const txt = `${ph} ${aria} ${labelText}`.toLowerCase();
+                return (
+                    ph.includes("1.000.000.000") ||
+                    txt.includes("clp") ||
+                    txt.includes("ahorro máximo") ||
+                    txt.includes("precision aproximada") ||
+                    txt.includes("precisión aproximada")
+                );
+            }
+
+            function attachFormatter(input) {
+                if (!shouldFormatInput(input)) return;
+                input.dataset.clpFormatterAttached = "1";
+                input.setAttribute("inputmode", "numeric");
+                input.setAttribute("autocomplete", "off");
+
+                const applyFormat = () => {
+                    if (input.dataset.clpFormatting === "1") return;
+                    const current = input.value || "";
+                    const formatted = formatThousandsCLP(current);
+                    if (formatted === current) return;
+                    input.dataset.clpFormatting = "1";
+                    nativeSetValue(input, formatted);
+                    input.dispatchEvent(new Event("input", { bubbles: true }));
+                    input.dispatchEvent(new Event("change", { bubbles: true }));
+                    input.dataset.clpFormatting = "0";
+                    try {
+                        const end = input.value.length;
+                        input.setSelectionRange(end, end);
+                    } catch (e) {}
+                };
+
+                input.addEventListener("input", applyFormat);
+                input.addEventListener("blur", applyFormat);
+                applyFormat();
+            }
+
+            function scanInputs() {
+                doc.querySelectorAll('input[type="text"]').forEach(attachFormatter);
+            }
+
+            scanInputs();
+            const observer = new MutationObserver(scanInputs);
+            observer.observe(doc.body, { childList: true, subtree: true });
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
     )
 
 
@@ -2811,6 +2900,7 @@ st.set_page_config(
 )
 inject_css()
 password_gate()
+install_clp_input_formatter()
 
 st.markdown(
     f"""
